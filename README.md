@@ -34,8 +34,11 @@ simulation_results.csv.
 ```
 
 Notes
+
 The .venv folder is excluded using .gitignore
+
 Generated files (like CSV outputs) may be ignored depending on configuration
+
 Author
 
 [lagay niyo na lang pangalan niyo.]
