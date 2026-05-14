@@ -25,8 +25,13 @@ Run the simulation using:
 
 ```bash
 python traffic_simulation.py
+```
 
-Output will be saved to simulation_results.csv.
+Output will be saved to:
+
+```bash
+simulation_results.csv.
+```
 
 Notes
 The .venv folder is excluded using .gitignore
