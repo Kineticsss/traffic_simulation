@@ -1,23 +1,21 @@
-# Virtual environment
-.venv/
-
 # Python cache
 __pycache__/
-*.py[cod]
+*.pyc
 
-# Environment variables
-.env
+# Virtual environment
+.venv/
+venv/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# Build files
-build/
-dist/
-
-# IDE settings
+# IDE files
 .vscode/
 .idea/
 
-# Simulation outputs
+# OS files
+.DS_Store
+Thumbs.db
+
+# Output / generated files
 *.csv
+*.log
+output/
+results/
