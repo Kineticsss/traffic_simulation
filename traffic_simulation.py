@@ -362,6 +362,9 @@ class SimData:
         self.wait_times      : list[float] = []
         self.throughput_log  : list[tuple] = []
         self.queue_log       : list[tuple] = []
+        self.max_queue_seen = 0
+        self.reset_time = 0.0
+
         self.reset_flag      = False
 
 SD = SimData()
@@ -488,14 +491,14 @@ def run_simulation(sd: SimData):
 
                     sd.wait_times.clear()
                     sd.throughput_log.clear()
+                    sd.queue_log.clear()
 
-                    if hasattr(sd, "queue_log"):
-                        sd.queue_log.clear()
+                    sd.sim_time = 0.0
 
                     sd.total_vehicles = 0
-
-                    # allow generators to resume safely next frame
                     sd.reset_flag = False
+
+                    sd.reset_time = env.now
 
                 lights = list(sd.lights)
                 now    = env.now
@@ -505,7 +508,12 @@ def run_simulation(sd: SimData):
                     if v["state"] == "queued"
                 )
 
-                sd.queue_log.append((now, queued_count))
+                sd.max_queue_seen = max(
+                sd.max_queue_seen,
+                queued_count
+                )
+
+                sd.queue_log.append((now - sd.reset_time, queued_count))
 
                 # Per-(dir,lane) queue lists with slots
                 ql: dict[tuple,list] = {}
@@ -850,53 +858,205 @@ def _render_car(surf, x, y, angle_deg, col, state, wait, fxs):
 # ═══════════════════════════════════════════════════════
 #  CHARTS
 # ═══════════════════════════════════════════════════════
-_chart_cache=None; _chart_last_n=-1
+_chart_cache = None
+_chart_last_n = -1
 
-def build_chart(sd,w,h):
-    global _chart_cache,_chart_last_n
+def build_chart(sd, w, h):
+    global _chart_cache, _chart_last_n
+
     with sd.lock:
         waits = list(sd.wait_times)
         log   = list(sd.throughput_log)
-        qlog  = list(sd.queue_log)
+        qlog  = list(getattr(sd, "queue_log", []))
         done  = len(sd.completed)
-    if done==_chart_last_n and _chart_cache: return _chart_cache
-    _chart_last_n=done
-    fig, axes = plt.subplots(3, 1, figsize=(w/100, h/100), dpi=100)
+
+    # Cache optimization
+    if done == _chart_last_n and _chart_cache is not None:
+        return _chart_cache
+
+    _chart_last_n = done
+
+    # Create figure
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(w / 100, h / 100),
+        dpi=100
+    )
+
     fig.patch.set_facecolor("#0c0e14")
-    for ax,kind,data,title,xl,yl,col in [
-        (axes[0],"hist",waits,"Vehicle Wait Times","Wait (s)","Count","#5090ff"),
-        (axes[1],"line",log,"Cumulative Throughput","Sim Time (s)","Vehicles","#50ffa0"),
-    ]:
-        ax.set_facecolor("#171926"); ax.set_title(title,color="#dce1f0",fontsize=9,pad=5)
-        ax.set_xlabel(xl,color="#787e96",fontsize=7); ax.set_ylabel(yl,color="#787e96",fontsize=7)
-        ax.tick_params(colors="#787e96",labelsize=6)
-        for sp in ax.spines.values(): sp.set_color("#282b40")
-        if kind=="hist" and data:
-            ax.hist(data,bins=max(6,min(20,len(data)//3+1)),color=col,edgecolor="#080a12",lw=0.5)
-        elif kind=="line" and data:
-            xs=[l[0] for l in data]; ys=list(range(1,len(data)+1))
-            ax.plot(xs,ys,color=col,lw=1.3); ax.fill_between(xs,ys,alpha=0.10,color=col)
-            # Queue size chart
-            axes[2].set_facecolor("#171926")
-            axes[2].set_title("Vehicles Waiting Over Time", color="#dce1f0", fontsize=9, pad=5)
-            axes[2].set_xlabel("Sim Time (s)", color="#787e96", fontsize=7)
-            axes[2].set_ylabel("Queued Vehicles", color="#787e96", fontsize=7)
-            axes[2].tick_params(colors="#787e96", labelsize=6)
 
-            for sp in axes[2].spines.values():
-                sp.set_color("#282b40")
+    # Common axis styling
+    for ax in axes:
+        ax.set_facecolor("#171926")
 
-            if qlog:
-                xs = [q[0] for q in qlog]
-                ys = [q[1] for q in qlog]
+        ax.tick_params(
+            colors="#bfc7d5",
+            labelsize=7
+        )
 
-                axes[2].plot(xs, ys, lw=1.5)
-                axes[2].fill_between(xs, ys, alpha=0.15)
-                
-    fig.tight_layout(pad=1.5)
-    canvas=agg.FigureCanvasAgg(fig); canvas.draw()
-    s=pygame.image.frombuffer(canvas.buffer_rgba(),canvas.get_width_height(),"RGBA")
-    plt.close(fig); _chart_cache=s.copy(); return _chart_cache
+        for sp in ax.spines.values():
+            sp.set_color("#30364a")
+
+        ax.grid(True, alpha=0.15)
+
+    # ─────────────────────────────
+    # WAIT TIME HISTOGRAM
+    # ─────────────────────────────
+    axes[0].set_title(
+        "Vehicle Wait Time Distribution",
+        color="white",
+        fontsize=10
+    )
+
+    axes[0].set_xlabel(
+        "Wait Time (s)",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    axes[0].set_ylabel(
+        "Vehicles",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    if waits:
+        bins = max(6, min(20, len(waits) // 3 + 1))
+
+        axes[0].hist(
+            waits,
+            bins=bins
+        )
+
+        avg_wait = sum(waits) / len(waits)
+
+        axes[0].axvline(
+            avg_wait,
+            linestyle="--",
+            linewidth=1.5
+        )
+
+        axes[0].text(
+            avg_wait,
+            axes[0].get_ylim()[1] * 0.9,
+            f"Avg {avg_wait:.1f}s",
+            fontsize=8,
+            color="white"
+        )
+
+    # ─────────────────────────────
+    # THROUGHPUT GRAPH
+    # ─────────────────────────────
+    axes[1].set_title(
+        "Intersection Throughput",
+        color="white",
+        fontsize=10
+    )
+
+    axes[1].set_xlabel(
+        "Simulation Time (s)",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    axes[1].set_ylabel(
+        "Vehicles Passed",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    if log:
+        xs = [x[0] for x in log]
+        ys = list(range(1, len(log) + 1))
+
+        axes[1].plot(xs, ys, linewidth=2)
+
+        axes[1].fill_between(
+            xs,
+            ys,
+            alpha=0.15
+        )
+
+    axes[1].set_xlim(left=0)
+    axes[1].set_ylim(bottom=0)
+
+    # ─────────────────────────────
+    # QUEUE SIZE GRAPH
+    # ─────────────────────────────
+    axes[2].set_title(
+        "Vehicles Waiting Over Time",
+        color="white",
+        fontsize=10
+    )
+
+    axes[2].set_xlabel(
+        "Simulation Time (s)",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    axes[2].set_ylabel(
+        "Queued Vehicles",
+        color="#cfd6e6",
+        fontsize=8
+    )
+
+    if qlog:
+        sample_rate = max(1, len(qlog) // 300)
+
+        sampled = qlog[::sample_rate]
+
+        xs = [q[0] for q in sampled]
+        ys = [q[1] for q in sampled]
+
+        axes[2].plot(xs, ys, linewidth=2)
+
+        axes[2].fill_between(
+            xs,
+            ys,
+            alpha=0.15
+        )
+
+        peak = sd.max_queue_seen
+
+        axes[2].text(
+            xs[-1] * 0.7,
+            peak * 0.9,
+            f"Peak Queue: {peak}",
+            fontsize=8,
+            color="white"
+        )
+
+        axes[2].set_xlim(left=0)
+        axes[2].set_ylim(bottom=0)
+
+    fig.subplots_adjust(
+    left=0.08,
+    right=0.98,
+    top=0.96,
+    bottom=0.06,
+    hspace=0.42
+    )
+
+    # Convert matplotlib → pygame surface
+    canvas = agg.FigureCanvasAgg(fig)
+    canvas.draw()
+
+    renderer = canvas.get_renderer()
+    raw_data = renderer.buffer_rgba()
+
+    surf = pygame.image.frombuffer(
+    raw_data,
+    (int(w), int(h)),
+    "RGBA"
+    )
+
+    plt.close(fig)
+
+    _chart_cache = surf.copy()
+
+    return _chart_cache
 
 # ═══════════════════════════════════════════════════════
 #  STATS PANEL
@@ -1036,8 +1196,17 @@ def main():
         screen.fill(C["bg"])
         if show_charts:
             screen.blit(build_chart(SD,VIEW_W,HEIGHT),(0,0))
-            lb=fxs.render("Press [C] to return",True,C["text_dim"])
-            screen.blit(lb,(VIEW_W//2-lb.get_width()//2,HEIGHT-26))
+            header = pygame.Surface((VIEW_W, 34), pygame.SRCALPHA)
+            pygame.draw.rect(header, (0, 0, 0, 120), (0, 0, VIEW_W, 34))
+            screen.blit(header, (0, 0))
+
+            lb = font.render(
+                "TRAFFIC ANALYTICS DASHBOARD  •  Press [C] to return",
+                True,
+                (230, 235, 245)
+            )
+
+            screen.blit(lb, (18, 8))
         else:
             screen.blit(road_surf,(0,0))
             draw_lights(screen,SD,fxs)
