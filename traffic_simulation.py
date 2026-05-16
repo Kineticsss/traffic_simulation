@@ -131,6 +131,7 @@ C = {
 # ═══════════════════════════════════════════════════════
 
 def ib_coord(from_dir, lane):
+    lane = max(0, min(lane, len(LANE_OFFS)-1))   # clamp — prevents IndexError on lane toggle
     off = LANE_OFFS[lane]
     if from_dir == 0: return CX + off
     if from_dir == 2: return CX - off
@@ -138,6 +139,7 @@ def ib_coord(from_dir, lane):
     return             CY - off
 
 def ob_coord(exit_dir, lane):
+    lane = max(0, min(lane, len(LANE_OFFS)-1))   # clamp
     off = LANE_OFFS[lane]
     if exit_dir == 0: return CX - off
     if exit_dir == 2: return CX + off
@@ -195,7 +197,7 @@ def build_path(from_dir, turn, lane):
     # Exit lane:
     #   straight → same lane index on the opposite arm
     #   turn     → innermost lane (0) of the new arm
-    ex_lane = lane if turn == "straight" else 0
+    ex_lane = min(lane, N_LANES - 1)
     ec = ob_coord(exit_dir, ex_lane)
 
     # Box exit point and off-screen depart
@@ -238,19 +240,26 @@ def path_length(path):
                for i in range(len(path)-1))
 
 def path_pos_at_dist(path, dist):
-    acc = 0.0
-    for i in range(len(path)-1):
-        dx = path[i+1][0]-path[i][0]
-        dy = path[i+1][1]-path[i][1]
+    """Return (x, y, heading_deg) at `dist` pixels along the path.
+    Correctly handles every segment without skipping."""
+    dist = max(0.0, dist)
+    acc  = 0.0
+    for i in range(len(path) - 1):
+        dx = path[i+1][0] - path[i][0]
+        dy = path[i+1][1] - path[i][1]
         sl = math.hypot(dx, dy)
-        if sl == 0: continue
-        if acc + sl >= dist or i == len(path)-2:
-            t = max(0.0, min(1.0, (dist-acc)/sl))
-            return (path[i][0]+t*dx,
-                    path[i][1]+t*dy,
+        if sl < 1e-9:
+            continue          # skip zero-length segment
+        if dist <= acc + sl:  # target is inside this segment
+            t = (dist - acc) / sl
+            return (path[i][0] + t*dx,
+                    path[i][1] + t*dy,
                     math.degrees(math.atan2(dy, dx)))
         acc += sl
-    return path[-1][0], path[-1][1], 0.0
+    # Past the end — return final point with heading of last segment
+    dx = path[-1][0] - path[-2][0]
+    dy = path[-1][1] - path[-2][1]
+    return path[-1][0], path[-1][1], math.degrees(math.atan2(dy, dx))
 
 # ═══════════════════════════════════════════════════════
 #  QUEUE PIXEL POSITION
@@ -273,20 +282,20 @@ def queue_pixel(v):
 # ═══════════════════════════════════════════════════════
 class SimData:
     def __init__(self):
-        self.lock           = threading.Lock()
-        self.vehicles       : list[dict] = []
-        self.completed      : list[dict] = []
-        self.light_ns       = "green"
-        self.light_ew       = "red"
-        self.light_timer    = 0
-        self.sim_time       = 0.0
-        self.total_vehicles = 0
-        self.scenario       = "Normal"
-        self.running        = True
-        self.speed_factor   = 1.0
-        self.wait_times     : list[float] = []
-        self.throughput_log : list[tuple] = []
-        self.reset_flag     = False   # signal mover to flush vehicles
+        self.lock            = threading.Lock()
+        self.vehicles        : list[dict] = []
+        self.completed       : list[dict] = []
+        self.lights          = ["green","red","red","red"]  # per direction
+        self.timers          = [30,0,0,0]
+        self.active_dir      = 0
+        self.sim_time        = 0.0
+        self.total_vehicles  = 0
+        self.scenario        = "Normal"
+        self.running         = True
+        self.speed_factor    = 1.0
+        self.wait_times      : list[float] = []
+        self.throughput_log  : list[tuple] = []
+        self.reset_flag      = False
 
 SD = SimData()
 
@@ -296,222 +305,264 @@ SD = SimData()
 def run_simulation(sd: SimData):
     env = simpy.Environment()
 
-    # ── Light controller (one direction green at a time) ──
+    # ── 4-direction rotating light controller ──
+    # Only ONE direction is green at a time.
+    # Sequence: dir0 green→yellow → all-red → dir1 green→yellow → all-red → ...
     def light_ctrl(env):
+        cur = 0
         while sd.running:
             cfg = SCENARIOS[sd.scenario]
-            G, Y, CLR, R = cfg["green"], cfg["yellow"], cfg["clear"], cfg["red"]
-            for ns, ew, dur in [
-                ("green",  "red",    G),
-                ("yellow", "red",    Y),
-                ("red",    "red",    CLR),   # all-red gap
-                ("red",    "green",  R),
-                ("red",    "yellow", Y),
-                ("red",    "red",    CLR),   # all-red gap
-            ]:
-                with sd.lock:
-                    sd.light_ns    = ns
-                    sd.light_ew    = ew
-                    sd.light_timer = dur
-                for t in range(dur):
-                    if not sd.running: return
-                    yield env.timeout(1.0)
-                    with sd.lock:
-                        sd.light_timer = max(0, dur - t - 1)
-                        sd.sim_time    = env.now
+            G, Y, CLR = cfg["green"], cfg["yellow"], cfg["clear"]
 
-    # ── Spawner: one per direction ──
+            # Green
+            with sd.lock:
+                sd.lights     = ["red"]*4
+                sd.lights[cur]= "green"
+                sd.timers     = [0]*4
+                sd.timers[cur]= G
+                sd.active_dir = cur
+            for t in range(G):
+                if not sd.running: return
+                yield env.timeout(1.0)
+                with sd.lock:
+                    sd.timers[cur] = max(0, G-t-1)
+                    sd.sim_time    = env.now
+
+            # Yellow
+            with sd.lock:
+                sd.lights[cur] = "yellow"
+                sd.timers[cur] = Y
+            for t in range(Y):
+                if not sd.running: return
+                yield env.timeout(1.0)
+                with sd.lock:
+                    sd.timers[cur] = max(0, Y-t-1)
+                    sd.sim_time    = env.now
+
+            # All-red clearance
+            with sd.lock:
+                sd.lights = ["red"]*4
+                sd.timers = [CLR]*4
+            for t in range(CLR):
+                if not sd.running: return
+                yield env.timeout(1.0)
+                with sd.lock:
+                    for i in range(4): sd.timers[i] = max(0, CLR-t-1)
+                    sd.sim_time = env.now
+
+            cur = (cur + 1) % 4
+
+    # ── Spawner ──
     def gen_vehicles(env, from_dir):
         vid = 0
         while sd.running:
-            cfg  = SCENARIOS[sd.scenario]
-            yield env.timeout(random.expovariate(1.0 / cfg["arrival"]))
+            cfg = SCENARIOS[sd.scenario]
+            yield env.timeout(random.expovariate(1.0/cfg["arrival"]))
             if sd.reset_flag: continue
-            vid  += 1
-            turn  = random.choices(TURNS, TURN_PROBS)[0]
-            lane  = random.randint(0, N_LANES - 1)
-            path  = build_path(from_dir, turn, lane)
-            plen  = path_length(path)
-            # Distance along path from spawn to stop line
+            vid += 1
+            turn = random.choices(TURNS, TURN_PROBS)[0]
+            # Lane selection based on movement
+            # 0 = innermost/leftmost
+            # last = outermost/rightmost
+
+            # Corrected lane usage for YOUR geometry
+            # lane 0 = outermost lane
+            # lane N-1 = innermost lane
+
+            if turn == "left":
+                # Left turns use inner lane
+                lane = N_LANES - 1
+
+            elif turn == "right":
+                # Right turns use outer lane
+                lane = 0
+
+            else:
+                # Straight uses middle lanes
+                if N_LANES <= 2:
+                    lane = random.randint(0, N_LANES - 1)
+                else:
+                    mids = list(range(1, N_LANES - 1))
+                    lane = random.choice(mids)
+            path = build_path(from_dir, turn, lane)
+            plen = path_length(path)
             stop_d = math.hypot(path[1][0]-path[0][0], path[1][1]-path[0][1])
             with sd.lock:
                 sd.total_vehicles += 1
                 sd.vehicles.append({
-                    "id":         f"{DIR_NAMES[from_dir][0]}{vid}",
-                    "from_dir":   from_dir,
-                    "lane":       lane,
-                    "turn":       turn,
-                    "path":       path,
-                    "plen":       plen,
-                    "stop_d":     stop_d,
-                    "dist":       0.0,        # distance travelled along path
-                    "state":      "approach", # approach → queued → moving → done
-                    "arrive":     env.now,
-                    "depart":     None,
-                    "wait":       0.0,
-                    "queue_slot": 0,
-                    "color":      random.choice(C["car_colors"]),
+                    "id":        f"{DIR_NAMES[from_dir][0]}{vid}",
+                    "from_dir":  from_dir,
+                    "lane":      lane,
+                    "turn":      turn,
+                    "path":      path,
+                    "plen":      plen,
+                    "stop_d":    stop_d,
+                    "dist":      0.0,
+                    "state":     "approach",
+                    "arrive":    env.now,
+                    "depart":    None,
+                    "wait":      0.0,
+                    "queue_slot":0,
+                    "color":     random.choice(C["car_colors"]),
                 })
 
-    # ── Mover: advances every frame ──
+    # ── Mover ──
     def mover(env):
         while sd.running:
             yield env.timeout(FRAME_T)
             with sd.lock:
-                # Handle reset
                 if sd.reset_flag:
-                    sd.vehicles.clear()
-                    sd.completed.clear()
-                    sd.wait_times.clear()
-                    sd.throughput_log.clear()
-                    sd.total_vehicles = 0
-                    sd.reset_flag = False
+                    sd.vehicles.clear(); sd.completed.clear()
+                    sd.wait_times.clear(); sd.throughput_log.clear()
+                    sd.total_vehicles = 0; sd.reset_flag = False
                     continue
 
-                l_ns = sd.light_ns
-                l_ew = sd.light_ew
-                now  = env.now
+                lights = list(sd.lights)
+                now    = env.now
 
-                # ── Build per-(dir,lane) queue lists, assign slots ──
-                # Only "queued" vehicles (stopped at light)
-                ql: dict[tuple, list] = {}
+                # Per-(dir,lane) queue lists with slots
+                ql: dict[tuple,list] = {}
                 for v in sd.vehicles:
                     if v["state"] == "queued":
                         key = (v["from_dir"], v["lane"])
-                        ql.setdefault(key, []).append(v)
+                        ql.setdefault(key,[]).append(v)
                 for q in ql.values():
                     q.sort(key=lambda v: v["arrive"])
-                    for slot, v in enumerate(q):
-                        v["queue_slot"] = slot
+                    for slot,v in enumerate(q): v["queue_slot"] = slot
 
-                # ── Per-(dir,lane) moving vehicle distances ──
-                # Used to prevent passing and to guard stop-line release
-                mov: dict[tuple, list] = {}
+                # Moving vehicles tracked per (direction,lane)
+                mov_lane = {}
+
                 for v in sd.vehicles:
                     if v["state"] == "moving":
                         key = (v["from_dir"], v["lane"])
-                        mov.setdefault(key, []).append(v["dist"])
-                for lst in mov.values():
+                        mov_lane.setdefault(key, []).append(v["dist"])
+
+                for lst in mov_lane.values():
                     lst.sort()
 
-                remove = []
-
+                # Box occupancy: which from_dirs have a car inside the box?
+                # A car is "in the box" when its dist is between stop_d and
+                # stop_d + HR*4 (generous diagonal crossing distance).
+                BOX_CROSS = HR * 4
+                in_box: set[int] = set()
                 for v in sd.vehicles:
-                    d     = v["from_dir"]
-                    lane  = v["lane"]
-                    key   = (d, lane)
-                    green = (l_ns if d in (0,2) else l_ew) == "green"
+                    if (v["state"] == "moving"
+                            and v["stop_d"] <= v["dist"] <= v["stop_d"] + BOX_CROSS):
+                        in_box.add(v["from_dir"])
 
-                    # ── APPROACH: travelling toward stop line ──
+                remove = []
+                for v in sd.vehicles:
+                    d    = v["from_dir"]
+                    lane = v["lane"]
+                    key  = (d, lane)
+                    grn  = lights[d] == "green"
+
+                    # ── APPROACH ──
                     if v["state"] == "approach":
-                        # Check how far the back of the queue is for this lane
-                        q = ql.get(key, [])
-                        n_queued = len(q)
-                        # Tail of queue: slot n_queued sits (n_queued+1) SLOTs behind stop
-                        tail_dist = v["stop_d"] - (n_queued + 1) * SLOT
+                        q        = ql.get(key, [])
+                        n_q      = len(q)
+                        tail_d   = v["stop_d"] - (n_q + 1) * SLOT
 
-                        # Also check moving cars in same lane ahead
-                        mv_in_lane = mov.get(key, [])
+                        # Gap-follow moving cars ahead in same direction
+                        ahead_mv = [dd for dd in mov_lane.get((d, lane), []) if dd > v["dist"]]
+                        if ahead_mv:
+                            gap = min(ahead_mv) - v["dist"]
+                            safe = CAR_LEN + CAR_GAP
+                            spd = CAR_SPEED * max(0.0,(gap/safe)-0.05) if gap < safe else CAR_SPEED
+                        else:
+                            spd = CAR_SPEED
 
-                        # Maximum distance we can advance to (cannot enter another car)
-                        max_advance = tail_dist
-                        if mv_in_lane:
-                            # Don't get closer than SLOT to the last moving car in lane
-                            # (that car's dist is in path-space; tail_dist is also path-space)
-                            closest_moving = min(mv_in_lane)
-                            max_advance = min(max_advance, closest_moving - SLOT)
+                        new_d = min(v["dist"] + spd, max(v["dist"], tail_d))
+                        v["dist"] = new_d
 
-                        # Advance toward stop line
-                        new_dist = min(v["dist"] + CAR_SPEED, max_advance)
-                        v["dist"] = max(v["dist"], new_dist)  # never go backward
-
-                        # Arrived at queue tail → become queued
-                        if v["dist"] >= tail_dist - 1:
-                            v["dist"]  = tail_dist
+                        if v["dist"] >= tail_d - 0.5:
+                            v["dist"] = tail_d
                             v["state"] = "queued"
-                            v["queue_slot"] = n_queued
-                            ql.setdefault(key, []).append(v)
+                            v["queue_slot"] = n_q
+                            ql.setdefault(key,[]).append(v)
                             ql[key].sort(key=lambda v: v["arrive"])
-                            for slot, qv in enumerate(ql[key]):
-                                qv["queue_slot"] = slot
+                            for i,qv in enumerate(ql[key]): qv["queue_slot"] = i
 
-                    # ── QUEUED: frozen at slot position, wait for green ──
+                    # ── QUEUED ──
                     elif v["state"] == "queued":
                         v["wait"] = now - v["arrive"]
                         slot = v.get("queue_slot", 0)
                         q    = ql.get(key, [])
 
-                        if green and slot == 0:
-                            # Release only if no moving car is within SLOT of the stop line
-                            mv_ahead = mov.get(key, [])
-                            too_close = any(dd < v["stop_d"] + SLOT for dd in mv_ahead)
-                            if not too_close:
+                        if grn and slot == 0:
+
+                            # Only check spacing in SAME lane
+                            lane_clear = True
+
+                            for ov in sd.vehicles:
+                                if (
+                                    ov is not v
+                                    and ov["state"] == "moving"
+                                    and ov["from_dir"] == d
+                                    and ov["lane"] == lane
+                                ):
+                                    if abs(ov["dist"] - v["stop_d"]) < SLOT * 1.2:
+                                        lane_clear = False
+                                        break
+
+                            if lane_clear:
                                 v["state"] = "moving"
                                 v["dist"]  = v["stop_d"]
-                                mov.setdefault(key, []).append(v["dist"])
-                                mov[key].sort()
+
+                                mov_lane.get((d, lane), []).append(v["dist"])
+                                mov_lane.get((d, lane), []).sort()
+
                                 q.remove(v)
+
                                 for i, rv in enumerate(q):
                                     rv["queue_slot"] = i
 
-                        elif green and slot > 0:
-                            # Release when the car directly ahead has moved at
-                            # least SLOT distance past the stop line
-                            leader = q[slot - 1]
+                        elif grn and slot > 0:
+                            leader = q[slot-1]
                             if (leader["state"] == "moving"
                                     and leader["dist"] >= v["stop_d"] + SLOT):
                                 v["state"] = "moving"
                                 v["dist"]  = v["stop_d"]
-                                mov.setdefault(key, []).append(v["dist"])
-                                mov[key].sort()
+                                mov_lane.get((d, lane), []).append(v["dist"]); mov_lane.get((d, lane), []).sort()
+                                in_box.add(d)
                                 q.remove(v)
-                                for i, rv in enumerate(q):
-                                    rv["queue_slot"] = i
-                        # Red/yellow: frozen — nothing to do
+                                for i,rv in enumerate(q): rv["queue_slot"] = i
 
-                    # ── MOVING: gap-follow, never pass ──
+                    # ── MOVING ──
                     elif v["state"] == "moving":
-                        mv_in_lane = mov.get(key, [])
-                        ahead = [dd for dd in mv_in_lane if dd > v["dist"] + 0.5]
-                        if ahead:
-                            gap  = min(ahead) - v["dist"]
+                        ahead_mv = [dd for dd in mov_lane.get((d, lane), []) if dd > v["dist"] + 0.5]
+                        if ahead_mv:
+                            gap  = min(ahead_mv) - v["dist"]
                             safe = CAR_LEN + CAR_GAP
-                            spd  = (CAR_SPEED * max(0.0, (gap / safe) - 0.05)
-                                    if gap < safe else CAR_SPEED)
+                            spd  = CAR_SPEED * max(0.0,(gap/safe)-0.05) if gap < safe else CAR_SPEED
                         else:
                             spd = CAR_SPEED
 
-                        old_d = v["dist"]
+                        old_d     = v["dist"]
                         v["dist"] = min(v["plen"], old_d + spd)
-
-                        # Update position in mov map
-                        try:    mov[key].remove(old_d)
+                        try:    mov_lane.get((d, lane), []).remove(old_d)
                         except: pass
-                        mov.setdefault(key, []).append(v["dist"])
-                        mov[key].sort()
+                        mov_lane.get((d, lane), []).append(v["dist"]); mov_lane.get((d, lane), []).sort()
 
                         if v["dist"] >= v["plen"] - 0.5:
-                            v["state"]  = "done"
-                            v["depart"] = now
+                            v["state"] = "done"; v["depart"] = now
                             sd.wait_times.append(v["wait"])
-                            sd.throughput_log.append((now, len(sd.completed)+1))
+                            sd.throughput_log.append((now,len(sd.completed)+1))
                             remove.append(v)
 
                 for v in remove:
-                    sd.vehicles.remove(v)
-                    sd.completed.append(v)
+                    sd.vehicles.remove(v); sd.completed.append(v)
 
     env.process(light_ctrl(env))
     env.process(mover(env))
-    for d in range(4):
-        env.process(gen_vehicles(env, d))
+    for d in range(4): env.process(gen_vehicles(env, d))
 
-    # Paced loop: sleep FRAME_T real-seconds per sim-frame at 1x speed
     while sd.running:
         target = env.now + FRAME_T
-        while env.peek() <= target and sd.running:
-            env.step()
+        while env.peek() <= target and sd.running: env.step()
         time.sleep(FRAME_T / sd.speed_factor)
+
 
 # ═══════════════════════════════════════════════════════
 #  HELPERS
@@ -621,7 +672,9 @@ def _draw_crosswalks(surf, cx, cy):
 def draw_lights(surf, sd, fxs):
     cx, cy = CX, CY
     with sd.lock:
-        l_ns=sd.light_ns; l_ew=sd.light_ew; timer=sd.light_timer
+        lights = list(sd.lights)   # [dir0, dir1, dir2, dir3]
+        timers = list(sd.timers)
+        active = sd.active_dir
 
     def pole(px, py, state):
         pygame.draw.rect(surf,(46,50,65),(px-2,py,4,24),border_radius=2)
@@ -639,12 +692,19 @@ def draw_lights(surf, sd, fxs):
                 surf.blit(g,(px-10,lcy-10))
             pygame.draw.circle(surf,col,(px,lcy),6)
 
-    pole(cx-HR-22,cy-HR-54,l_ns); pole(cx+HR+8,cy+HR+4,l_ns)
-    pole(cx+HR+8,cy-HR-54,l_ew); pole(cx-HR-22,cy+HR+4,l_ew)
-    tb=pygame.Surface((46,18),pygame.SRCALPHA)
-    pygame.draw.rect(tb,(0,0,0,165),(0,0,46,18),border_radius=4)
-    surf.blit(tb,(cx-23,cy-9))
-    ts=fxs.render(f"{int(timer):02d}s",True,C["text"])
+    # NW pole = from-North (dir 0), NE pole = from-East (dir 1)
+    # SE pole = from-South (dir 2), SW pole = from-West (dir 3)
+    pole(cx-HR-22, cy-HR-54, lights[0])   # NW → dir0 (from North)
+    pole(cx+HR+8,  cy-HR-54, lights[1])   # NE → dir1 (from East)
+    pole(cx+HR+8,  cy+HR+4,  lights[2])   # SE → dir2 (from South)
+    pole(cx-HR-22, cy+HR+4,  lights[3])   # SW → dir3 (from West)
+
+    # Active direction timer badge
+    tb=pygame.Surface((52,18),pygame.SRCALPHA)
+    pygame.draw.rect(tb,(0,0,0,165),(0,0,52,18),border_radius=4)
+    surf.blit(tb,(cx-26,cy-9))
+    label = f"D{active}:{int(timers[active]):02d}s"
+    ts=fxs.render(label,True,C["text"])
     surf.blit(ts,(cx-ts.get_width()//2,cy-8))
 
 # ═══════════════════════════════════════════════════════
@@ -754,26 +814,30 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
     y=div(y); y=ctr(sd.scenario,y,fsm,C["accent2"]); y=div(y)
 
     with sd.lock:
-        l_ns=sd.light_ns; l_ew=sd.light_ew; timer=sd.light_timer
+        lights=list(sd.lights); timers=list(sd.timers); active=sd.active_dir
         sim_t=sd.sim_time; tv=sd.total_vehicles
         wait=sum(1 for v in sd.vehicles if v["state"]=="queued")
         move=sum(1 for v in sd.vehicles if v["state"]=="moving")
         appr=sum(1 for v in sd.vehicles if v["state"]=="approach")
         done=len(sd.completed); waits=list(sd.wait_times)
 
-    def lbox(lbl,state,bx,by):
+    # 4 small light boxes (2×2 grid)
+    dirs_label=["N","E","S","W"]
+    bw,bh=48,38
+    bx0=px+6; by0=y
+    for i in range(4):
+        bx=bx0+(i%2)*(bw+4); by=by0+(i//2)*(bh+4)
         cm={"green":C["green_light"],"yellow":C["yellow_light"],"red":C["red_light"]}
-        col=cm.get(state,C["text_dim"])
-        rrect(surf,(24,28,42),(bx,by,88,46),r=6)
-        pygame.draw.rect(surf,col,(bx,by,88,46),2,border_radius=6)
-        ls=fxs.render(lbl,True,C["text_dim"]); surf.blit(ls,(bx+44-ls.get_width()//2,by+4))
-        dot=pygame.Surface((14,14),pygame.SRCALPHA)
-        pygame.draw.circle(dot,(*col,210),(7,7),7); surf.blit(dot,(bx+37,by+22))
-        ss=fxs.render(state.upper(),True,col); surf.blit(ss,(bx+44-ss.get_width()//2,by+27))
-
-    lbox("N-S",l_ns,px+6,y); lbox("E-W",l_ew,px+pw-94,y); y+=52
-    ts=fxs.render(f"Phase: {int(timer):02d}s",True,C["text"])
-    surf.blit(ts,(px+pw//2-ts.get_width()//2,y)); y+=16; y=div(y)
+        col=cm.get(lights[i],C["text_dim"])
+        rrect(surf,(24,28,42),(bx,by,bw,bh),r=5)
+        pygame.draw.rect(surf,col,(bx,by,bw,bh),2,border_radius=5)
+        lbl=fxs.render(dirs_label[i],True,C["text_dim"])
+        surf.blit(lbl,(bx+bw//2-lbl.get_width()//2,by+3))
+        st=fxs.render(lights[i][:3].upper(),True,col)
+        surf.blit(st,(bx+bw//2-st.get_width()//2,by+14))
+        tm=fxs.render(f"{int(timers[i])}s",True,C["text_dim"])
+        surf.blit(tm,(bx+bw//2-tm.get_width()//2,by+24))
+    y=by0+bh*2+8+6; y=div(y)
     y=row("Sim Time",f"{sim_t:.1f}s",y)
     y=row("Spawned",tv,y); y=row("Completed",done,y,C["green_light"])
     y=row("Approaching",appr,y,(180,180,255))
