@@ -424,8 +424,12 @@ def run_simulation(sd: SimData):
         vid = 0
         while sd.running:
             cfg = SCENARIOS[sd.scenario]
-            yield env.timeout(random.expovariate(1.0/cfg["arrival"]))
-            if sd.reset_flag: continue
+            yield env.timeout(random.expovariate(1.0 / cfg["arrival"]))
+
+            # Skip spawning while reset is occurring
+            if sd.reset_flag:
+                yield env.timeout(0.1)
+                continue
             vid += 1
             turn = random.choices(TURNS, TURN_PROBS)[0]
             # Lane selection based on movement
@@ -481,10 +485,17 @@ def run_simulation(sd: SimData):
                 if sd.reset_flag:
                     sd.vehicles.clear()
                     sd.completed.clear()
+
                     sd.wait_times.clear()
                     sd.throughput_log.clear()
-                    sd.queue_log.clear()
-                    continue
+
+                    if hasattr(sd, "queue_log"):
+                        sd.queue_log.clear()
+
+                    sd.total_vehicles = 0
+
+                    # allow generators to resume safely next frame
+                    sd.reset_flag = False
 
                 lights = list(sd.lights)
                 now    = env.now
