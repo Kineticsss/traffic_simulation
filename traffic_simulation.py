@@ -21,7 +21,7 @@ import matplotlib.backends.backend_agg as agg
 import pandas as pd
 
 # ═══════════════════════════════════════════════════════
-#  WINDOW
+#  WINDOW CONFIGURATION
 # ═══════════════════════════════════════════════════════
 WIDTH, HEIGHT = 1280, 780
 PANEL_W       = 230
@@ -30,10 +30,10 @@ CX            = VIEW_W // 2
 CY            = HEIGHT  // 2
 
 # ═══════════════════════════════════════════════════════
-#  ROAD GEOMETRY  (recomputed whenever N_LANES changes)
+#  ROAD GEOMETRY
 # ═══════════════════════════════════════════════════════
 LANE_OPTIONS = [2, 3, 4, 6]
-N_LANES      = 3          # current lane count (toggled at runtime)
+N_LANES      = 3          # default lane count (toggled at runtime)
 
 # Physical lane width shrinks as lane count grows so road fits on screen
 def lane_w_for(n):
@@ -69,7 +69,7 @@ SIM_FPS = 60.0
 FRAME_T = 1.0 / SIM_FPS   # sim-seconds per mover tick
 
 # ═══════════════════════════════════════════════════════
-#  SCENARIOS
+#  TRAFFIC CONGESTION SCENARIOS
 # ═══════════════════════════════════════════════════════
 SCENARIOS = {
     "Normal": {"green": 30, "yellow": 4, "clear": 3, "red": 30, "arrival": 3.5},
@@ -108,6 +108,69 @@ C = {
         (255,120,162),(120,255,192),(255,170,95),(95,195,255),
     ],
 }
+
+# ═══════════════════════════════════════════════════════
+#  THEMES
+# ═══════════════════════════════════════════════════════
+THEMES = {
+
+    "classic": {
+        "bg": (12,14,20),
+        "grass": (24,40,24),
+        "road": (36,38,47),
+        "road_box": (28,30,39),
+        "divider": (200,175,30),
+        "lane_dash": (85,89,70),
+        "kerb": (50,53,63),
+        "stop_line": (220,220,220),
+        "panel": (15,18,28),
+        "border": (42,47,68),
+        "text": (214,221,238),
+        "text_dim": (90,100,128),
+        "accent": (60,140,255),
+        "accent2": (255,178,36),
+        "green_light": (36,205,75),
+        "yellow_light": (255,198,36),
+        "red_light": (255,46,46),
+
+        "car_colors": [
+            (80,162,255),
+            (255,102,65),
+            (100,208,125),
+            (255,198,60),
+        ]
+    },
+
+    "cyber": {
+        "bg": (5,8,20),
+        "grass": (10,10,18),
+        "road": (20,20,35),
+        "road_box": (12,14,28),
+        "divider": (0,255,255),
+        "lane_dash": (120,120,255),
+        "kerb": (70,70,120),
+        "stop_line": (240,240,255),
+        "panel": (10,12,25),
+        "border": (0,180,255),
+        "text": (220,240,255),
+        "text_dim": (120,160,220),
+        "accent": (0,255,255),
+        "accent2": (255,0,180),
+        "green_light": (0,255,120),
+        "yellow_light": (255,220,0),
+        "red_light": (255,50,80),
+
+        "car_colors": [
+            (0,255,255),
+            (255,0,180),
+            (120,255,0),
+            (255,140,0),
+        ]
+    }
+}
+
+CURRENT_THEME = "classic"
+C = THEMES[CURRENT_THEME]
 
 # ═══════════════════════════════════════════════════════
 #  COORDINATE HELPERS
@@ -295,6 +358,10 @@ class SimData:
         self.speed_factor    = 1.0
         self.wait_times      : list[float] = []
         self.throughput_log  : list[tuple] = []
+        self.queue_log : list[tuple] = []
+        self.wait_times      : list[float] = []
+        self.throughput_log  : list[tuple] = []
+        self.queue_log       : list[tuple] = []
         self.reset_flag      = False
 
 SD = SimData()
@@ -412,13 +479,22 @@ def run_simulation(sd: SimData):
             yield env.timeout(FRAME_T)
             with sd.lock:
                 if sd.reset_flag:
-                    sd.vehicles.clear(); sd.completed.clear()
-                    sd.wait_times.clear(); sd.throughput_log.clear()
-                    sd.total_vehicles = 0; sd.reset_flag = False
+                    sd.vehicles.clear()
+                    sd.completed.clear()
+                    sd.wait_times.clear()
+                    sd.throughput_log.clear()
+                    sd.queue_log.clear()
                     continue
 
                 lights = list(sd.lights)
                 now    = env.now
+
+                queued_count = sum(
+                    1 for v in sd.vehicles
+                    if v["state"] == "queued"
+                )
+
+                sd.queue_log.append((now, queued_count))
 
                 # Per-(dir,lane) queue lists with slots
                 ql: dict[tuple,list] = {}
@@ -541,8 +617,9 @@ def run_simulation(sd: SimData):
 
                         old_d     = v["dist"]
                         v["dist"] = min(v["plen"], old_d + spd)
-                        try:    mov_lane.get((d, lane), []).remove(old_d)
-                        except: pass
+                        lane_list = mov_lane.get((d, lane), [])
+                        if old_d in lane_list:
+                            lane_list.remove(old_d)
                         mov_lane.get((d, lane), []).append(v["dist"]); mov_lane.get((d, lane), []).sort()
 
                         if v["dist"] >= v["plen"] - 0.5:
@@ -767,10 +844,13 @@ _chart_cache=None; _chart_last_n=-1
 def build_chart(sd,w,h):
     global _chart_cache,_chart_last_n
     with sd.lock:
-        waits=list(sd.wait_times); log=list(sd.throughput_log); done=len(sd.completed)
+        waits = list(sd.wait_times)
+        log   = list(sd.throughput_log)
+        qlog  = list(sd.queue_log)
+        done  = len(sd.completed)
     if done==_chart_last_n and _chart_cache: return _chart_cache
     _chart_last_n=done
-    fig,axes=plt.subplots(1,2,figsize=(w/100,h/100),dpi=100)
+    fig, axes = plt.subplots(3, 1, figsize=(w/100, h/100), dpi=100)
     fig.patch.set_facecolor("#0c0e14")
     for ax,kind,data,title,xl,yl,col in [
         (axes[0],"hist",waits,"Vehicle Wait Times","Wait (s)","Count","#5090ff"),
@@ -785,6 +865,23 @@ def build_chart(sd,w,h):
         elif kind=="line" and data:
             xs=[l[0] for l in data]; ys=list(range(1,len(data)+1))
             ax.plot(xs,ys,color=col,lw=1.3); ax.fill_between(xs,ys,alpha=0.10,color=col)
+            # Queue size chart
+            axes[2].set_facecolor("#171926")
+            axes[2].set_title("Vehicles Waiting Over Time", color="#dce1f0", fontsize=9, pad=5)
+            axes[2].set_xlabel("Sim Time (s)", color="#787e96", fontsize=7)
+            axes[2].set_ylabel("Queued Vehicles", color="#787e96", fontsize=7)
+            axes[2].tick_params(colors="#787e96", labelsize=6)
+
+            for sp in axes[2].spines.values():
+                sp.set_color("#282b40")
+
+            if qlog:
+                xs = [q[0] for q in qlog]
+                ys = [q[1] for q in qlog]
+
+                axes[2].plot(xs, ys, lw=1.5)
+                axes[2].fill_between(xs, ys, alpha=0.15)
+                
     fig.tight_layout(pad=1.5)
     canvas=agg.FigureCanvasAgg(fig); canvas.draw()
     s=pygame.image.frombuffer(canvas.buffer_rgba(),canvas.get_width_height(),"RGBA")
@@ -864,7 +961,9 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
 #  MAIN
 # ═══════════════════════════════════════════════════════
 def main():
-    global N_LANES, LANE_W, LANE_OFFS, HR, _chart_cache, _chart_last_n
+    global N_LANES, LANE_W, LANE_OFFS, HR
+    global _chart_cache, _chart_last_n
+    global CURRENT_THEME, C
 
     pygame.init()
     screen=pygame.display.set_mode((WIDTH,HEIGHT))
@@ -908,6 +1007,15 @@ def main():
                     SD.reset_flag=True
                     _chart_cache=None; _chart_last_n=-1
                     road_dirty[0]=True
+                elif event.key == pygame.K_t:
+                    names = list(THEMES.keys())
+
+                    idx = names.index(CURRENT_THEME)
+                    CURRENT_THEME = names[(idx + 1) % len(names)]
+
+                    C = THEMES[CURRENT_THEME]
+
+                    road_surf = build_road_surface()
 
         # Rebuild road surface if lane count changed
         if road_dirty[0]:
