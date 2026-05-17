@@ -871,17 +871,17 @@ def build_chart(sd, w, h):
         done  = len(sd.completed)
 
     # Cache optimization
-    if done == _chart_last_n and _chart_cache is not None:
+    if abs(done - _chart_last_n) < 5 and _chart_cache is not None:
         return _chart_cache
 
     _chart_last_n = done
 
     # Create figure
     fig, axes = plt.subplots(
-        3,
-        1,
-        figsize=(w / 100, h / 100),
-        dpi=100
+    3,
+    1,
+    figsize=(w / 100, h / 100),
+    dpi=100
     )
 
     fig.patch.set_facecolor("#0c0e14")
@@ -900,9 +900,9 @@ def build_chart(sd, w, h):
 
         ax.grid(True, alpha=0.15)
 
-    # ─────────────────────────────
-    # WAIT TIME HISTOGRAM
-    # ─────────────────────────────
+# ─────────────────────────────
+# WAIT TIME HISTOGRAM
+# ─────────────────────────────
     axes[0].set_title(
         "Vehicle Wait Time Distribution",
         color="white",
@@ -921,6 +921,9 @@ def build_chart(sd, w, h):
         fontsize=8
     )
 
+    # DEFAULT VALUES
+    avg_wait = 0
+
     if waits:
         bins = max(6, min(20, len(waits) // 3 + 1))
 
@@ -931,18 +934,27 @@ def build_chart(sd, w, h):
 
         avg_wait = sum(waits) / len(waits)
 
+        # Average line
         axes[0].axvline(
             avg_wait,
             linestyle="--",
-            linewidth=1.5
+            linewidth=2
         )
 
+        # Bigger avg label
         axes[0].text(
             avg_wait,
-            axes[0].get_ylim()[1] * 0.9,
-            f"Avg {avg_wait:.1f}s",
-            fontsize=8,
-            color="white"
+            axes[0].get_ylim()[1] * 0.88,
+            f"AVG: {avg_wait:.1f}s",
+            fontsize=11,
+            fontweight="bold",
+            color="white",
+            bbox=dict(
+                facecolor="black",
+                alpha=0.85,
+                edgecolor="white",
+                boxstyle="round,pad=0.45"
+            )
         )
 
     # ─────────────────────────────
@@ -978,8 +990,12 @@ def build_chart(sd, w, h):
             alpha=0.15
         )
 
+        axes[1].set_ylim(0, max(ys) * 1.15)
+
     axes[1].set_xlim(left=0)
-    axes[1].set_ylim(bottom=0)
+
+    if log:
+        axes[1].set_ylim(0, max(ys) * 1.15)
 
     # ─────────────────────────────
     # QUEUE SIZE GRAPH
@@ -1003,8 +1019,7 @@ def build_chart(sd, w, h):
     )
 
     if qlog:
-        sample_rate = max(1, len(qlog) // 300)
-
+        sample_rate = max(1, len(qlog) // 350)
         sampled = qlog[::sample_rate]
 
         xs = [q[0] for q in sampled]
@@ -1018,25 +1033,32 @@ def build_chart(sd, w, h):
             alpha=0.15
         )
 
-        peak = sd.max_queue_seen
+        peak = max(ys) if ys else 1
 
         axes[2].text(
-            xs[-1] * 0.7,
-            peak * 0.9,
-            f"Peak Queue: {peak}",
-            fontsize=8,
-            color="white"
+        xs[-1] * 0.65,
+        peak * 0.88,
+        f"PEAK QUEUE: {peak}",
+        fontsize=11,
+        fontweight="bold",
+        color="white",
+        bbox=dict(
+            facecolor="black",
+            alpha=0.85,
+            edgecolor="white",
+            boxstyle="round,pad=0.45"
         )
-
+    )
+    
         axes[2].set_xlim(left=0)
         axes[2].set_ylim(bottom=0)
 
     fig.subplots_adjust(
-    left=0.08,
-    right=0.98,
-    top=0.96,
+    left=0.11,
+    right=0.97,
+    top=0.955,
     bottom=0.06,
-    hspace=0.42
+    hspace=0.72
     )
 
     # Convert matplotlib → pygame surface
@@ -1046,15 +1068,24 @@ def build_chart(sd, w, h):
     renderer = canvas.get_renderer()
     raw_data = renderer.buffer_rgba()
 
+    canvas_w, canvas_h = canvas.get_width_height()
+
     surf = pygame.image.frombuffer(
-    raw_data,
-    (int(w), int(h)),
-    "RGBA"
-    )
+        raw_data,
+        (canvas_w, canvas_h),
+        "RGBA"
+    ).convert_alpha()
+
+    if canvas_w != int(w) or canvas_h != int(h):
+        surf = pygame.transform.smoothscale(
+            surf,
+            (int(w), int(h))
+        )
 
     plt.close(fig)
 
     _chart_cache = surf.copy()
+    del surf
 
     return _chart_cache
 
@@ -1195,7 +1226,12 @@ def main():
 
         screen.fill(C["bg"])
         if show_charts:
-            screen.blit(build_chart(SD,VIEW_W,HEIGHT),(0,0))
+            chart_top = 34
+
+            screen.blit(
+                build_chart(SD, VIEW_W, HEIGHT - chart_top),
+                (0, chart_top)
+            )
             header = pygame.Surface((VIEW_W, 34), pygame.SRCALPHA)
             pygame.draw.rect(header, (0, 0, 0, 120), (0, 0, VIEW_W, 34))
             screen.blit(header, (0, 0))
