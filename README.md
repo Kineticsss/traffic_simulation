@@ -286,6 +286,7 @@ traffic-light-simulation/
 # 👨‍💻 Developers
 
 | Name | Role |
+|---|---|
 | Kent Ian V. Ramirez | Backend Developer |
 
 ### Batangas State University — CICS
@@ -303,7 +304,6 @@ This project is for educational purposes only.
 
 # 📷 Screenshots
 
-```markdown
 ## Main Simulation Window
 ![Simulation Screenshot](images/simulation_main.png)
 
@@ -316,8 +316,6 @@ This project is for educational purposes only.
 
 ## Theme Change
 ![Lane Modes](images/theme_toggle.png)
-
-```
 
 ---
 
