@@ -33,9 +33,8 @@ CY            = HEIGHT  // 2
 #  ROAD GEOMETRY
 # ═══════════════════════════════════════════════════════
 LANE_OPTIONS = [2, 3, 4, 6]
-N_LANES      = 3          # default lane count (toggled at runtime)
+N_LANES      = 3
 
-# Physical lane width shrinks as lane count grows so road fits on screen
 def lane_w_for(n):
     return {2: 36, 3: 28, 4: 24, 6: 18}[n]
 
@@ -56,17 +55,16 @@ LANE_W, LANE_OFFS, HR = compute_geometry(N_LANES)
 CAR_LEN   = 20
 CAR_W     = 12
 CAR_GAP   = 5
-SLOT      = CAR_LEN + CAR_GAP     # px per queue slot
-STOP_DIST = 12                     # px from box edge to stop line
+SLOT      = CAR_LEN + CAR_GAP
+STOP_DIST = 12
 
-# Speed in px per sim-frame (at 60 fps, 60 px/s feels natural)
 CAR_SPEED = 1.0
 
 # ═══════════════════════════════════════════════════════
 #  TIMING
 # ═══════════════════════════════════════════════════════
 SIM_FPS = 60.0
-FRAME_T = 1.0 / SIM_FPS   # sim-seconds per mover tick
+FRAME_T = 1.0 / SIM_FPS
 
 # ═══════════════════════════════════════════════════════
 #  TRAFFIC CONGESTION SCENARIOS
@@ -234,7 +232,6 @@ def build_path(from_dir, turn, lane):
     ic  = ib_coord(from_dir, lane)
     stp = stop_px(from_dir)
 
-    # Approach: spawn well off-screen → stop line → box edge
     if from_dir == 0:
         spawn   = (ic, -80)
         stop_pt = (ic, stp)
@@ -252,18 +249,13 @@ def build_path(from_dir, turn, lane):
         stop_pt = (stp, ic)
         box_in  = (CX - HR, ic)
 
-    # Exit direction — delta never 0 mod 4 (no U-turn)
     exit_dir = {"right":    (from_dir+3)%4,
                 "straight": (from_dir+2)%4,
                 "left":     (from_dir+1)%4}[turn]
 
-    # Exit lane:
-    #   straight → same lane index on the opposite arm
-    #   turn     → innermost lane (0) of the new arm
     ex_lane = min(lane, N_LANES - 1)
     ec = ob_coord(exit_dir, ex_lane)
 
-    # Box exit point and off-screen depart
     if exit_dir == 0:
         box_out = (ec, CY - HR)
         depart  = (ec, -80)
@@ -278,7 +270,6 @@ def build_path(from_dir, turn, lane):
         depart  = (-80, ec)
 
     if turn == "straight":
-        # Keep fixed axis through box so car never drifts
         if from_dir in (0, 2):
             box_out = (ic, box_out[1])
             depart  = (ic, depart[1])
@@ -287,7 +278,6 @@ def build_path(from_dir, turn, lane):
             depart  = (depart[0], ic)
         return [spawn, stop_pt, box_in, box_out, depart]
 
-    # Turn: quadratic Bézier through the intersection corner
     bix, biy = box_in
     bx2, by2 = box_out
     cp = (bix, by2) if from_dir in (0, 2) else (bx2, biy)
@@ -312,14 +302,14 @@ def path_pos_at_dist(path, dist):
         dy = path[i+1][1] - path[i][1]
         sl = math.hypot(dx, dy)
         if sl < 1e-9:
-            continue          # skip zero-length segment
-        if dist <= acc + sl:  # target is inside this segment
+            continue
+        if dist <= acc + sl:
             t = (dist - acc) / sl
             return (path[i][0] + t*dx,
                     path[i][1] + t*dy,
                     math.degrees(math.atan2(dy, dx)))
         acc += sl
-    # Past the end — return final point with heading of last segment
+
     dx = path[-1][0] - path[-2][0]
     dy = path[-1][1] - path[-2][1]
     return path[-1][0], path[-1][1], math.degrees(math.atan2(dy, dx))
@@ -348,7 +338,7 @@ class SimData:
         self.lock            = threading.Lock()
         self.vehicles        : list[dict] = []
         self.completed       : list[dict] = []
-        self.lights          = ["green","red","red","red"]  # per direction
+        self.lights          = ["green","red","red","red"]
         self.timers          = [30,0,0,0]
         self.active_dir      = 0
         self.sim_time        = 0.0
@@ -375,9 +365,6 @@ SD = SimData()
 def run_simulation(sd: SimData):
     env = simpy.Environment()
 
-    # ── 4-direction rotating light controller ──
-    # Only ONE direction is green at a time.
-    # Sequence: dir0 green→yellow → all-red → dir1 green→yellow → all-red → ...
     def light_ctrl(env):
         cur = 0
         while sd.running:
@@ -435,13 +422,6 @@ def run_simulation(sd: SimData):
                 continue
             vid += 1
             turn = random.choices(TURNS, TURN_PROBS)[0]
-            # Lane selection based on movement
-            # 0 = innermost/leftmost
-            # last = outermost/rightmost
-
-            # Corrected lane usage for YOUR geometry
-            # lane 0 = outermost lane
-            # lane N-1 = innermost lane
 
             if turn == "left":
                 # Left turns use inner lane
@@ -536,9 +516,6 @@ def run_simulation(sd: SimData):
                 for lst in mov_lane.values():
                     lst.sort()
 
-                # Box occupancy: which from_dirs have a car inside the box?
-                # A car is "in the box" when its dist is between stop_d and
-                # stop_d + HR*4 (generous diagonal crossing distance).
                 BOX_CROSS = HR * 4
                 in_box: set[int] = set()
                 for v in sd.vehicles:
@@ -559,7 +536,6 @@ def run_simulation(sd: SimData):
                         n_q      = len(q)
                         tail_d   = v["stop_d"] - (n_q + 1) * SLOT
 
-                        # Gap-follow moving cars ahead in same direction
                         ahead_mv = [dd for dd in mov_lane.get((d, lane), []) if dd > v["dist"]]
                         if ahead_mv:
                             gap = min(ahead_mv) - v["dist"]
@@ -587,7 +563,6 @@ def run_simulation(sd: SimData):
 
                         if grn and slot == 0:
 
-                            # Only check spacing in SAME lane
                             lane_clear = True
 
                             for ov in sd.vehicles:
@@ -695,9 +670,7 @@ def build_road_surface():
     dk = C["lane_dash"]
     dl, dg = 18, 12
 
-    # Dashed lane separators between adjacent lanes (both IB and OB sides)
     for i in range(1, N_LANES):
-        # N-S road: IB east side, OB west side
         lx_ib = cx + dh + i * LANE_W
         lx_ob = cx - dh - i * LANE_W
         for y0, y1 in [(0, cy-HR), (cy+HR, HEIGHT)]:
@@ -705,7 +678,6 @@ def build_road_surface():
                 w = min(dl, y1-y)
                 pygame.draw.rect(surf, dk, (lx_ib-1, y, 2, w))
                 pygame.draw.rect(surf, dk, (lx_ob-1, y, 2, w))
-        # E-W road: IB south side, OB north side
         ly_ib = cy + dh + i * LANE_W
         ly_ob = cy - dh - i * LANE_W
         for x0, x1 in [(0, cx-HR), (cx+HR, VIEW_W)]:
@@ -768,7 +740,7 @@ def _draw_crosswalks(surf, cx, cy):
 def draw_lights(surf, sd, fxs):
     cx, cy = CX, CY
     with sd.lock:
-        lights = list(sd.lights)   # [dir0, dir1, dir2, dir3]
+        lights = list(sd.lights)
         timers = list(sd.timers)
         active = sd.active_dir
 
@@ -921,7 +893,6 @@ def build_chart(sd, w, h):
         fontsize=8
     )
 
-    # DEFAULT VALUES
     avg_wait = 0
 
     if waits:
@@ -934,14 +905,12 @@ def build_chart(sd, w, h):
 
         avg_wait = sum(waits) / len(waits)
 
-        # Average line
         axes[0].axvline(
             avg_wait,
             linestyle="--",
             linewidth=2
         )
 
-        # Bigger avg label
         axes[0].text(
             avg_wait,
             axes[0].get_ylim()[1] * 0.88,
@@ -1061,7 +1030,6 @@ def build_chart(sd, w, h):
     hspace=0.72
     )
 
-    # Convert matplotlib → pygame surface
     canvas = agg.FigureCanvasAgg(fig)
     canvas.draw()
 
@@ -1120,7 +1088,6 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
         appr=sum(1 for v in sd.vehicles if v["state"]=="approach")
         done=len(sd.completed); waits=list(sd.wait_times)
 
-    # 4 small light boxes (2×2 grid)
     dirs_label=["N","E","S","W"]
     bw,bh=48,38
     bx0=px+6; by0=y
