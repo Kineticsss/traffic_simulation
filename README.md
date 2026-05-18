@@ -305,17 +305,17 @@ This project is for educational purposes only.
 # 📷 Screenshots
 
 ## Main Simulation Window
-![Simulation Screenshot](images/simulation_main.png)
+![Simulation Screenshot](assets/images/simulation_main.png)
 
 ---
 
 ## Analytics Dashboard
-![Analytics Dashboard](images/analytics_dashboard.png)
+![Analytics Dashboard](assets/images/analytics_dashboard.png)
 
 ---
 
 ## Theme Change
-![Lane Modes](images/theme_toggle.png)
+![Lane Modes](assets/images/theme_toggle.png)
 
 ---
 
