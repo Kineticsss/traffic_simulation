@@ -11,6 +11,8 @@ KEY DESIGN DECISIONS
 5. No U-turns. Straight → opposite outbound lane. Turn → adjacent outbound arm.
 6. One NS or EW phase green at a time. All-red clearance gap between phases.
 7. Lane count toggle: 2 / 3 / 4 / 6 lanes per direction. Road rebuilds on change.
+8. Pedestrians spawn at crosswalk edges during the all-red clearance phase.
+   They walk across the road and disappear on the other side.
 """
 
 import simpy, pygame, random, math, sys, threading, time
@@ -80,38 +82,32 @@ TURNS      = ["right","straight","left"]
 TURN_PROBS = [0.25,   0.50,     0.25]
 
 # ═══════════════════════════════════════════════════════
-#  COLOURS
+#  PEDESTRIAN CONFIGURATION
 # ═══════════════════════════════════════════════════════
-C = {
-    "bg":           (12,  14,  20),
-    "grass":        (22,  38,  22),
-    "road":         (38,  40,  50),
-    "road_box":     (30,  32,  42),
-    "divider":      (210, 180,  30),
-    "lane_dash":    (85,  89,  70),
-    "stop_line":    (222, 222, 222),
-    "kerb":         (54,  57,  68),
-    "panel":        (15,  18,  28),
-    "border":       (42,  47,  68),
-    "text":         (214, 221, 238),
-    "text_dim":     (90, 100, 128),
-    "accent":       (60,  140, 255),
-    "accent2":      (255, 178,  36),
-    "green_light":  (36,  205,  75),
-    "yellow_light": (255, 198,  36),
-    "red_light":    (255,  46,  46),
-    "car_colors": [
-        (80,162,255),(255,102,65),(100,208,125),(255,198,60),
-        (168,100,255),(255,145,80),(60,208,208),(192,192,202),
-        (255,120,162),(120,255,192),(255,170,95),(95,195,255),
-    ],
-}
+PED_SPEED        = 0.6          # pixels per frame
+PED_RADIUS       = 5            # drawn circle radius
+PED_SPAWN_CHANCE = 0.55         # probability a pedestrian spawns each clear phase per crosswalk
+PED_COLORS = [
+    (255, 200, 120),  # warm skin
+    (200, 150,  90),  # tan
+    (140,  90,  50),  # dark
+    (255, 220, 180),  # light
+    (180, 130,  80),  # medium
+]
+SHIRT_COLORS = [
+    (220,  60,  60),
+    ( 60, 120, 220),
+    ( 50, 180,  80),
+    (200, 160,  30),
+    (160,  60, 200),
+    (240, 120,  30),
+    ( 80, 200, 200),
+]
 
 # ═══════════════════════════════════════════════════════
-#  THEMES
+#  COLOURS / THEMES
 # ═══════════════════════════════════════════════════════
 THEMES = {
-
     "classic": {
         "bg": (12,14,20),
         "grass": (24,40,24),
@@ -130,15 +126,10 @@ THEMES = {
         "green_light": (36,205,75),
         "yellow_light": (255,198,36),
         "red_light": (255,46,46),
-
         "car_colors": [
-            (80,162,255),
-            (255,102,65),
-            (100,208,125),
-            (255,198,60),
+            (80,162,255),(255,102,65),(100,208,125),(255,198,60),
         ]
     },
-
     "cyber": {
         "bg": (5,8,20),
         "grass": (10,10,18),
@@ -157,12 +148,8 @@ THEMES = {
         "green_light": (0,255,120),
         "yellow_light": (255,220,0),
         "red_light": (255,50,80),
-
         "car_colors": [
-            (0,255,255),
-            (255,0,180),
-            (120,255,0),
-            (255,140,0),
+            (0,255,255),(255,0,180),(120,255,0),(255,140,0),
         ]
     }
 }
@@ -172,27 +159,9 @@ C = THEMES[CURRENT_THEME]
 
 # ═══════════════════════════════════════════════════════
 #  COORDINATE HELPERS
-#
-#  from_dir meaning:
-#    0 = coming FROM North  → car travels South → IB on east side  (CX + off)
-#    1 = coming FROM East   → car travels West  → IB on south side (CY + off)
-#    2 = coming FROM South  → car travels North → IB on west side  (CX - off)
-#    3 = coming FROM West   → car travels East  → IB on north side (CY - off)
-#
-#  Exit direction (no U-turn; delta never = 2 relative to from_dir):
-#    right    = (from_dir + 3) % 4
-#    straight = (from_dir + 2) % 4   → opposite arm outbound
-#    left     = (from_dir + 1) % 4
-#
-#  Outbound coord for exit_dir:
-#    exit 0 (north) → OB on west side  (CX - off)
-#    exit 2 (south) → OB on east side  (CX + off)
-#    exit 1 (east)  → OB on north side (CY - off)
-#    exit 3 (west)  → OB on south side (CY + off)
 # ═══════════════════════════════════════════════════════
-
 def ib_coord(from_dir, lane):
-    lane = max(0, min(lane, len(LANE_OFFS)-1))   # clamp — prevents IndexError on lane toggle
+    lane = max(0, min(lane, len(LANE_OFFS)-1))
     off = LANE_OFFS[lane]
     if from_dir == 0: return CX + off
     if from_dir == 2: return CX - off
@@ -200,7 +169,7 @@ def ib_coord(from_dir, lane):
     return             CY - off
 
 def ob_coord(exit_dir, lane):
-    lane = max(0, min(lane, len(LANE_OFFS)-1))   # clamp
+    lane = max(0, min(lane, len(LANE_OFFS)-1))
     off = LANE_OFFS[lane]
     if exit_dir == 0: return CX - off
     if exit_dir == 2: return CX + off
@@ -216,10 +185,6 @@ def stop_px(from_dir):
 
 # ═══════════════════════════════════════════════════════
 #  PATH BUILDER
-#  Waypoints: [spawn, stop_line, ...box_curve..., depart]
-#  spawn    = off-screen entry point
-#  stop_line = where car stops at red (path[1])
-#  depart   = off-screen exit point
 # ═══════════════════════════════════════════════════════
 def _bezier(p0, p1, p2, n=16):
     return [
@@ -293,8 +258,6 @@ def path_length(path):
                for i in range(len(path)-1))
 
 def path_pos_at_dist(path, dist):
-    """Return (x, y, heading_deg) at `dist` pixels along the path.
-    Correctly handles every segment without skipping."""
     dist = max(0.0, dist)
     acc  = 0.0
     for i in range(len(path) - 1):
@@ -316,9 +279,6 @@ def path_pos_at_dist(path, dist):
 
 # ═══════════════════════════════════════════════════════
 #  QUEUE PIXEL POSITION
-#  Slot 0 = immediately behind stop line
-#  Slot N = N slots further back
-#  Completely independent of path "dist" — purely geometric
 # ═══════════════════════════════════════════════════════
 def queue_pixel(v):
     d    = v["from_dir"]
@@ -331,6 +291,64 @@ def queue_pixel(v):
     return      float(stp - ofs), float(ic), 0.0
 
 # ═══════════════════════════════════════════════════════
+#  PEDESTRIAN HELPERS
+# ═══════════════════════════════════════════════════════
+def _crosswalk_endpoints(axis, side):
+    """
+    Returns (start_x, start_y, end_x, end_y) for a pedestrian crossing.
+
+    axis: "NS" = pedestrian crosses the vertical road (moves horizontally)
+          "EW" = pedestrian crosses the horizontal road (moves vertically)
+    side: "north" / "south" for EW crosswalk
+          "west"  / "east"  for NS crosswalk
+    """
+    offset = HR + 10   # a few pixels outside the stop line
+
+    if axis == "NS":
+        # Crosses the vertical road band — walks left↔right
+        road_left  = CX - HR
+        road_right = CX + HR
+        if side == "west":
+            y = CY - offset
+        else:
+            y = CY + offset
+        # randomly pick which side they start from
+        if random.random() < 0.5:
+            return road_left - 5, y, road_right + 5, y
+        else:
+            return road_right + 5, y, road_left - 5, y
+
+    else:  # "EW"
+        # Crosses the horizontal road band — walks up↓
+        road_top    = CY - HR
+        road_bottom = CY + HR
+        if side == "west":
+            x = CX - offset
+        else:
+            x = CX + offset
+        if random.random() < 0.5:
+            return x, road_top - 5, x, road_bottom + 5
+        else:
+            return x, road_bottom + 5, x, road_top - 5
+
+
+def make_pedestrian(pid, axis, side):
+    sx, sy, ex, ey = _crosswalk_endpoints(axis, side)
+    dist   = math.hypot(ex - sx, ey - sy)
+    return {
+        "id":       pid,
+        "sx": sx, "sy": sy,
+        "ex": ex, "ey": ey,
+        "total":    dist,
+        "walked":   0.0,
+        "done":     False,
+        "skin":     random.choice(PED_COLORS),
+        "shirt":    random.choice(SHIRT_COLORS),
+        "bob":      random.uniform(0, math.pi * 2),   # walking bob phase
+    }
+
+
+# ═══════════════════════════════════════════════════════
 #  SIMULATION STATE
 # ═══════════════════════════════════════════════════════
 class SimData:
@@ -338,6 +356,9 @@ class SimData:
         self.lock            = threading.Lock()
         self.vehicles        : list[dict] = []
         self.completed       : list[dict] = []
+        self.pedestrians     : list[dict] = []   # ← NEW
+        self.ped_id_counter  = 0                 # ← NEW
+        self.ped_phase_active = False            # ← NEW: True during all-red clearance
         self.lights          = ["green","red","red","red"]
         self.timers          = [30,0,0,0]
         self.active_dir      = 0
@@ -348,13 +369,9 @@ class SimData:
         self.speed_factor    = 1.0
         self.wait_times      : list[float] = []
         self.throughput_log  : list[tuple] = []
-        self.queue_log : list[tuple] = []
-        self.wait_times      : list[float] = []
-        self.throughput_log  : list[tuple] = []
         self.queue_log       : list[tuple] = []
-        self.max_queue_seen = 0
-        self.reset_time = 0.0
-
+        self.max_queue_seen  = 0
+        self.reset_time      = 0.0
         self.reset_flag      = False
 
 SD = SimData()
@@ -373,11 +390,12 @@ def run_simulation(sd: SimData):
 
             # Green
             with sd.lock:
-                sd.lights     = ["red"]*4
-                sd.lights[cur]= "green"
-                sd.timers     = [0]*4
-                sd.timers[cur]= G
-                sd.active_dir = cur
+                sd.lights      = ["red"]*4
+                sd.lights[cur] = "green"
+                sd.timers      = [0]*4
+                sd.timers[cur] = G
+                sd.active_dir  = cur
+                sd.ped_phase_active = False
             for t in range(G):
                 if not sd.running: return
                 yield env.timeout(1.0)
@@ -389,6 +407,7 @@ def run_simulation(sd: SimData):
             with sd.lock:
                 sd.lights[cur] = "yellow"
                 sd.timers[cur] = Y
+                sd.ped_phase_active = False
             for t in range(Y):
                 if not sd.running: return
                 yield env.timeout(1.0)
@@ -396,16 +415,35 @@ def run_simulation(sd: SimData):
                     sd.timers[cur] = max(0, Y-t-1)
                     sd.sim_time    = env.now
 
-            # All-red clearance
+            # ── All-red clearance — PEDESTRIAN PHASE ──
             with sd.lock:
                 sd.lights = ["red"]*4
                 sd.timers = [CLR]*4
+                sd.ped_phase_active = True
+
+                # Spawn pedestrians at all four crosswalk edges
+                crosswalks = [
+                    ("NS", "west"),
+                    ("NS", "east"),
+                    ("EW", "west"),
+                    ("EW", "east"),
+                ]
+                for axis, side in crosswalks:
+                    if random.random() < PED_SPAWN_CHANCE:
+                        sd.ped_id_counter += 1
+                        sd.pedestrians.append(
+                            make_pedestrian(sd.ped_id_counter, axis, side)
+                        )
+
             for t in range(CLR):
                 if not sd.running: return
                 yield env.timeout(1.0)
                 with sd.lock:
                     for i in range(4): sd.timers[i] = max(0, CLR-t-1)
                     sd.sim_time = env.now
+
+            with sd.lock:
+                sd.ped_phase_active = False
 
             cur = (cur + 1) % 4
 
@@ -416,7 +454,6 @@ def run_simulation(sd: SimData):
             cfg = SCENARIOS[sd.scenario]
             yield env.timeout(random.expovariate(1.0 / cfg["arrival"]))
 
-            # Skip spawning while reset is occurring
             if sd.reset_flag:
                 yield env.timeout(0.1)
                 continue
@@ -424,20 +461,16 @@ def run_simulation(sd: SimData):
             turn = random.choices(TURNS, TURN_PROBS)[0]
 
             if turn == "left":
-                # Left turns use inner lane
                 lane = N_LANES - 1
-
             elif turn == "right":
-                # Right turns use outer lane
                 lane = 0
-
             else:
-                # Straight uses middle lanes
                 if N_LANES <= 2:
                     lane = random.randint(0, N_LANES - 1)
                 else:
                     mids = list(range(1, N_LANES - 1))
                     lane = random.choice(mids)
+
             path = build_path(from_dir, turn, lane)
             plen = path_length(path)
             stop_d = math.hypot(path[1][0]-path[0][0], path[1][1]-path[0][1])
@@ -460,7 +493,7 @@ def run_simulation(sd: SimData):
                     "color":     random.choice(C["car_colors"]),
                 })
 
-    # ── Mover ──
+    # ── Mover (vehicles + pedestrians) ──
     def mover(env):
         while sd.running:
             yield env.timeout(FRAME_T)
@@ -468,34 +501,38 @@ def run_simulation(sd: SimData):
                 if sd.reset_flag:
                     sd.vehicles.clear()
                     sd.completed.clear()
-
+                    sd.pedestrians.clear()        # ← clear peds on reset
                     sd.wait_times.clear()
                     sd.throughput_log.clear()
                     sd.queue_log.clear()
-
-                    sd.sim_time = 0.0
-
+                    sd.sim_time       = 0.0
                     sd.total_vehicles = 0
-                    sd.reset_flag = False
-
-                    sd.reset_time = env.now
+                    sd.reset_flag     = False
+                    sd.reset_time     = env.now
 
                 lights = list(sd.lights)
                 now    = env.now
 
+                # ── Move pedestrians ──
+                still_walking = []
+                for p in sd.pedestrians:
+                    if p["done"]:
+                        continue
+                    p["walked"] = min(p["total"], p["walked"] + PED_SPEED)
+                    p["bob"]   += 0.25
+                    if p["walked"] >= p["total"] - 0.5:
+                        p["done"] = True
+                    else:
+                        still_walking.append(p)
+                sd.pedestrians = still_walking
+
+                # ── Vehicle logic (unchanged) ──
                 queued_count = sum(
-                    1 for v in sd.vehicles
-                    if v["state"] == "queued"
+                    1 for v in sd.vehicles if v["state"] == "queued"
                 )
-
-                sd.max_queue_seen = max(
-                sd.max_queue_seen,
-                queued_count
-                )
-
+                sd.max_queue_seen = max(sd.max_queue_seen, queued_count)
                 sd.queue_log.append((now - sd.reset_time, queued_count))
 
-                # Per-(dir,lane) queue lists with slots
                 ql: dict[tuple,list] = {}
                 for v in sd.vehicles:
                     if v["state"] == "queued":
@@ -505,14 +542,11 @@ def run_simulation(sd: SimData):
                     q.sort(key=lambda v: v["arrive"])
                     for slot,v in enumerate(q): v["queue_slot"] = slot
 
-                # Moving vehicles tracked per (direction,lane)
                 mov_lane = {}
-
                 for v in sd.vehicles:
                     if v["state"] == "moving":
                         key = (v["from_dir"], v["lane"])
                         mov_lane.setdefault(key, []).append(v["dist"])
-
                 for lst in mov_lane.values():
                     lst.sort()
 
@@ -530,17 +564,16 @@ def run_simulation(sd: SimData):
                     key  = (d, lane)
                     grn  = lights[d] == "green"
 
-                    # ── APPROACH ──
                     if v["state"] == "approach":
-                        q        = ql.get(key, [])
-                        n_q      = len(q)
-                        tail_d   = v["stop_d"] - (n_q + 1) * SLOT
+                        q      = ql.get(key, [])
+                        n_q    = len(q)
+                        tail_d = v["stop_d"] - (n_q + 1) * SLOT
 
                         ahead_mv = [dd for dd in mov_lane.get((d, lane), []) if dd > v["dist"]]
                         if ahead_mv:
-                            gap = min(ahead_mv) - v["dist"]
+                            gap  = min(ahead_mv) - v["dist"]
                             safe = CAR_LEN + CAR_GAP
-                            spd = CAR_SPEED * max(0.0,(gap/safe)-0.05) if gap < safe else CAR_SPEED
+                            spd  = CAR_SPEED * max(0.0,(gap/safe)-0.05) if gap < safe else CAR_SPEED
                         else:
                             spd = CAR_SPEED
 
@@ -548,45 +581,35 @@ def run_simulation(sd: SimData):
                         v["dist"] = new_d
 
                         if v["dist"] >= tail_d - 0.5:
-                            v["dist"] = tail_d
-                            v["state"] = "queued"
-                            v["queue_slot"] = n_q
+                            v["dist"]        = tail_d
+                            v["state"]       = "queued"
+                            v["queue_slot"]  = n_q
                             ql.setdefault(key,[]).append(v)
                             ql[key].sort(key=lambda v: v["arrive"])
                             for i,qv in enumerate(ql[key]): qv["queue_slot"] = i
 
-                    # ── QUEUED ──
                     elif v["state"] == "queued":
                         v["wait"] = now - v["arrive"]
                         slot = v.get("queue_slot", 0)
                         q    = ql.get(key, [])
 
                         if grn and slot == 0:
-
                             lane_clear = True
-
                             for ov in sd.vehicles:
-                                if (
-                                    ov is not v
-                                    and ov["state"] == "moving"
-                                    and ov["from_dir"] == d
-                                    and ov["lane"] == lane
-                                ):
+                                if (ov is not v
+                                        and ov["state"] == "moving"
+                                        and ov["from_dir"] == d
+                                        and ov["lane"] == lane):
                                     if abs(ov["dist"] - v["stop_d"]) < SLOT * 1.2:
                                         lane_clear = False
                                         break
-
                             if lane_clear:
                                 v["state"] = "moving"
                                 v["dist"]  = v["stop_d"]
-
                                 mov_lane.get((d, lane), []).append(v["dist"])
                                 mov_lane.get((d, lane), []).sort()
-
                                 q.remove(v)
-
-                                for i, rv in enumerate(q):
-                                    rv["queue_slot"] = i
+                                for i, rv in enumerate(q): rv["queue_slot"] = i
 
                         elif grn and slot > 0:
                             leader = q[slot-1]
@@ -594,12 +617,12 @@ def run_simulation(sd: SimData):
                                     and leader["dist"] >= v["stop_d"] + SLOT):
                                 v["state"] = "moving"
                                 v["dist"]  = v["stop_d"]
-                                mov_lane.get((d, lane), []).append(v["dist"]); mov_lane.get((d, lane), []).sort()
+                                mov_lane.get((d, lane), []).append(v["dist"])
+                                mov_lane.get((d, lane), []).sort()
                                 in_box.add(d)
                                 q.remove(v)
                                 for i,rv in enumerate(q): rv["queue_slot"] = i
 
-                    # ── MOVING ──
                     elif v["state"] == "moving":
                         ahead_mv = [dd for dd in mov_lane.get((d, lane), []) if dd > v["dist"] + 0.5]
                         if ahead_mv:
@@ -614,16 +637,19 @@ def run_simulation(sd: SimData):
                         lane_list = mov_lane.get((d, lane), [])
                         if old_d in lane_list:
                             lane_list.remove(old_d)
-                        mov_lane.get((d, lane), []).append(v["dist"]); mov_lane.get((d, lane), []).sort()
+                        mov_lane.get((d, lane), []).append(v["dist"])
+                        mov_lane.get((d, lane), []).sort()
 
                         if v["dist"] >= v["plen"] - 0.5:
-                            v["state"] = "done"; v["depart"] = now
+                            v["state"]  = "done"
+                            v["depart"] = now
                             sd.wait_times.append(v["wait"])
-                            sd.throughput_log.append((now,len(sd.completed)+1))
+                            sd.throughput_log.append((now, len(sd.completed)+1))
                             remove.append(v)
 
                 for v in remove:
-                    sd.vehicles.remove(v); sd.completed.append(v)
+                    sd.vehicles.remove(v)
+                    sd.completed.append(v)
 
     env.process(light_ctrl(env))
     env.process(mover(env))
@@ -647,21 +673,19 @@ def rrect(surf, color, rect, r=8, alpha=None):
         pygame.draw.rect(surf, color, rect, border_radius=r)
 
 # ═══════════════════════════════════════════════════════
-#  STATIC ROAD SURFACE  (rebuilt whenever N_LANES changes)
+#  STATIC ROAD SURFACE
 # ═══════════════════════════════════════════════════════
 def build_road_surface():
     surf = pygame.Surface((VIEW_W, HEIGHT))
     cx, cy = CX, CY
     surf.fill(C["grass"])
 
-    # Road base rects
     pygame.draw.rect(surf, C["road"],     (cx-HR, 0,     HR*2,   HEIGHT))
     pygame.draw.rect(surf, C["road"],     (0,     cy-HR, VIEW_W, HR*2))
     pygame.draw.rect(surf, C["road_box"], (cx-HR, cy-HR, HR*2,   HR*2))
 
     dh = DIV_HALF
 
-    # Yellow centre divider (outside box only)
     pygame.draw.rect(surf, C["divider"], (cx-dh, 0,      DIV_W, cy-HR))
     pygame.draw.rect(surf, C["divider"], (cx-dh, cy+HR,  DIV_W, HEIGHT))
     pygame.draw.rect(surf, C["divider"], (0,      cy-dh, cx-HR, DIV_W))
@@ -686,14 +710,12 @@ def build_road_surface():
                 pygame.draw.rect(surf, dk, (x, ly_ib-1, w, 2))
                 pygame.draw.rect(surf, dk, (x, ly_ob-1, w, 2))
 
-    # Kerb edges
     kc = C["kerb"]
     pygame.draw.line(surf, kc, (cx-HR, 0),    (cx-HR, HEIGHT), 2)
     pygame.draw.line(surf, kc, (cx+HR, 0),    (cx+HR, HEIGHT), 2)
     pygame.draw.line(surf, kc, (0, cy-HR),    (VIEW_W, cy-HR), 2)
     pygame.draw.line(surf, kc, (0, cy+HR),    (VIEW_W, cy+HR), 2)
 
-    # Stop lines — span IB half only
     wl, st = C["stop_line"], 3
     ib_span = N_LANES * LANE_W
     soff    = HR + STOP_DIST
@@ -743,8 +765,9 @@ def draw_lights(surf, sd, fxs):
         lights = list(sd.lights)
         timers = list(sd.timers)
         active = sd.active_dir
+        ped_phase = sd.ped_phase_active
 
-    def pole(px, py, state):
+    def pole(px, py, state, show_walk=False):
         pygame.draw.rect(surf,(46,50,65),(px-2,py,4,24),border_radius=2)
         hw,hh=18,50; hx,hy=px-hw//2,py-hh
         rrect(surf,(16,19,29),(hx,hy,hw,hh),r=5)
@@ -760,20 +783,66 @@ def draw_lights(surf, sd, fxs):
                 surf.blit(g,(px-10,lcy-10))
             pygame.draw.circle(surf,col,(px,lcy),6)
 
-    # NW pole = from-North (dir 0), NE pole = from-East (dir 1)
-    # SE pole = from-South (dir 2), SW pole = from-West (dir 3)
-    pole(cx-HR-22, cy-HR-54, lights[0])   # NW → dir0 (from North)
-    pole(cx+HR+8,  cy-HR-54, lights[1])   # NE → dir1 (from East)
-    pole(cx+HR+8,  cy+HR+4,  lights[2])   # SE → dir2 (from South)
-    pole(cx-HR-22, cy+HR+4,  lights[3])   # SW → dir3 (from West)
+        # Pedestrian walk signal: small white walking figure below the pole
+        if show_walk:
+            wx, wy = px, py + 30
+            sig_col = (80, 220, 120)
+            pygame.draw.circle(surf, sig_col, (wx, wy),      4)        # head
+            pygame.draw.line(surf,   sig_col, (wx, wy+4),  (wx, wy+12), 2)  # body
+            pygame.draw.line(surf,   sig_col, (wx, wy+6),  (wx-5, wy+10), 2) # left arm
+            pygame.draw.line(surf,   sig_col, (wx, wy+6),  (wx+5, wy+10), 2) # right arm
+            pygame.draw.line(surf,   sig_col, (wx, wy+12), (wx-4, wy+19), 2) # left leg
+            pygame.draw.line(surf,   sig_col, (wx, wy+12), (wx+4, wy+19), 2) # right leg
 
-    # Active direction timer badge
+    pole(cx-HR-22, cy-HR-54, lights[0], show_walk=ped_phase)
+    pole(cx+HR+8,  cy-HR-54, lights[1], show_walk=ped_phase)
+    pole(cx+HR+8,  cy+HR+4,  lights[2], show_walk=ped_phase)
+    pole(cx-HR-22, cy+HR+4,  lights[3], show_walk=ped_phase)
+
     tb=pygame.Surface((52,18),pygame.SRCALPHA)
     pygame.draw.rect(tb,(0,0,0,165),(0,0,52,18),border_radius=4)
     surf.blit(tb,(cx-26,cy-9))
     label = f"D{active}:{int(timers[active]):02d}s"
     ts=fxs.render(label,True,C["text"])
     surf.blit(ts,(cx-ts.get_width()//2,cy-8))
+
+# ═══════════════════════════════════════════════════════
+#  PEDESTRIAN RENDERER
+# ═══════════════════════════════════════════════════════
+def draw_pedestrians(surf, sd):
+    with sd.lock:
+        peds = list(sd.pedestrians)
+
+    for p in peds:
+        if p["done"] or p["total"] < 1:
+            continue
+
+        t  = p["walked"] / p["total"]
+        px = int(p["sx"] + t * (p["ex"] - p["sx"]))
+        py = int(p["sy"] + t * (p["ey"] - p["sy"]))
+
+        # Walking bob: slight vertical oscillation
+        bob = int(math.sin(p["bob"]) * 2)
+
+        skin  = p["skin"]
+        shirt = p["shirt"]
+        r     = PED_RADIUS
+
+        # Shadow
+        sh = pygame.Surface((r*4, r*2), pygame.SRCALPHA)
+        pygame.draw.ellipse(sh, (0,0,0,60), (0,0,r*4,r*2))
+        surf.blit(sh, (px - r*2, py + r*2 + 2))
+
+        # Body (shirt colour)
+        pygame.draw.circle(surf, shirt, (px, py + bob + r), r)
+
+        # Head
+        pygame.draw.circle(surf, skin,  (px, py + bob - r + 1), r - 1)
+
+        # Legs — simple two-dot animation
+        leg_off = int(math.sin(p["bob"] * 2) * 3)
+        pygame.draw.circle(surf, skin, (px - 2, py + bob + r*2 + leg_off),     2)
+        pygame.draw.circle(surf, skin, (px + 2, py + bob + r*2 - leg_off + 1), 2)
 
 # ═══════════════════════════════════════════════════════
 #  VEHICLE RENDERER
@@ -818,7 +887,6 @@ def _render_car(surf, x, y, angle_deg, col, state, wait, fxs):
     rotated=pygame.transform.rotate(body,-(angle_deg-90))
     rr=rotated.get_rect(center=(x,y))
     surf.blit(rotated,rr.topleft)
-    # Badge: only queued, only after 2s wait
     if state=="queued" and wait>2.0:
         bw,bh=28,13
         badge=pygame.Surface((bw,bh),pygame.SRCALPHA)
@@ -830,7 +898,7 @@ def _render_car(surf, x, y, angle_deg, col, state, wait, fxs):
 # ═══════════════════════════════════════════════════════
 #  CHARTS
 # ═══════════════════════════════════════════════════════
-_chart_cache = None
+_chart_cache  = None
 _chart_last_n = -1
 
 def build_chart(sd, w, h):
@@ -842,219 +910,75 @@ def build_chart(sd, w, h):
         qlog  = list(getattr(sd, "queue_log", []))
         done  = len(sd.completed)
 
-    # Cache optimization
     if abs(done - _chart_last_n) < 5 and _chart_cache is not None:
         return _chart_cache
 
     _chart_last_n = done
 
-    # Create figure
-    fig, axes = plt.subplots(
-    3,
-    1,
-    figsize=(w / 100, h / 100),
-    dpi=100
-    )
-
+    fig, axes = plt.subplots(3, 1, figsize=(w/100, h/100), dpi=100)
     fig.patch.set_facecolor("#0c0e14")
 
-    # Common axis styling
     for ax in axes:
         ax.set_facecolor("#171926")
-
-        ax.tick_params(
-            colors="#bfc7d5",
-            labelsize=7
-        )
-
-        for sp in ax.spines.values():
-            sp.set_color("#30364a")
-
+        ax.tick_params(colors="#bfc7d5", labelsize=7)
+        for sp in ax.spines.values(): sp.set_color("#30364a")
         ax.grid(True, alpha=0.15)
 
-# ─────────────────────────────
-# WAIT TIME HISTOGRAM
-# ─────────────────────────────
-    axes[0].set_title(
-        "Vehicle Wait Time Distribution",
-        color="white",
-        fontsize=10
-    )
-
-    axes[0].set_xlabel(
-        "Wait Time (s)",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
-    axes[0].set_ylabel(
-        "Vehicles",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
+    axes[0].set_title("Vehicle Wait Time Distribution", color="white", fontsize=10)
+    axes[0].set_xlabel("Wait Time (s)", color="#cfd6e6", fontsize=8)
+    axes[0].set_ylabel("Vehicles", color="#cfd6e6", fontsize=8)
     avg_wait = 0
-
     if waits:
-        bins = max(6, min(20, len(waits) // 3 + 1))
+        bins = max(6, min(20, len(waits)//3+1))
+        axes[0].hist(waits, bins=bins)
+        avg_wait = sum(waits)/len(waits)
+        axes[0].axvline(avg_wait, linestyle="--", linewidth=2)
+        axes[0].text(avg_wait, axes[0].get_ylim()[1]*0.88,
+                     f"AVG: {avg_wait:.1f}s", fontsize=11, fontweight="bold",
+                     color="white",
+                     bbox=dict(facecolor="black",alpha=0.85,edgecolor="white",boxstyle="round,pad=0.45"))
 
-        axes[0].hist(
-            waits,
-            bins=bins
-        )
-
-        avg_wait = sum(waits) / len(waits)
-
-        axes[0].axvline(
-            avg_wait,
-            linestyle="--",
-            linewidth=2
-        )
-
-        axes[0].text(
-            avg_wait,
-            axes[0].get_ylim()[1] * 0.88,
-            f"AVG: {avg_wait:.1f}s",
-            fontsize=11,
-            fontweight="bold",
-            color="white",
-            bbox=dict(
-                facecolor="black",
-                alpha=0.85,
-                edgecolor="white",
-                boxstyle="round,pad=0.45"
-            )
-        )
-
-    # ─────────────────────────────
-    # THROUGHPUT GRAPH
-    # ─────────────────────────────
-    axes[1].set_title(
-        "Intersection Throughput",
-        color="white",
-        fontsize=10
-    )
-
-    axes[1].set_xlabel(
-        "Simulation Time (s)",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
-    axes[1].set_ylabel(
-        "Vehicles Passed",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
+    axes[1].set_title("Intersection Throughput", color="white", fontsize=10)
+    axes[1].set_xlabel("Simulation Time (s)", color="#cfd6e6", fontsize=8)
+    axes[1].set_ylabel("Vehicles Passed", color="#cfd6e6", fontsize=8)
     if log:
         xs = [x[0] for x in log]
-        ys = list(range(1, len(log) + 1))
-
+        ys = list(range(1, len(log)+1))
         axes[1].plot(xs, ys, linewidth=2)
-
-        axes[1].fill_between(
-            xs,
-            ys,
-            alpha=0.15
-        )
-
-        axes[1].set_ylim(0, max(ys) * 1.15)
-
+        axes[1].fill_between(xs, ys, alpha=0.15)
+        axes[1].set_ylim(0, max(ys)*1.15)
     axes[1].set_xlim(left=0)
 
-    if log:
-        axes[1].set_ylim(0, max(ys) * 1.15)
-
-    # ─────────────────────────────
-    # QUEUE SIZE GRAPH
-    # ─────────────────────────────
-    axes[2].set_title(
-        "Vehicles Waiting Over Time",
-        color="white",
-        fontsize=10
-    )
-
-    axes[2].set_xlabel(
-        "Simulation Time (s)",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
-    axes[2].set_ylabel(
-        "Queued Vehicles",
-        color="#cfd6e6",
-        fontsize=8
-    )
-
+    axes[2].set_title("Vehicles Waiting Over Time", color="white", fontsize=10)
+    axes[2].set_xlabel("Simulation Time (s)", color="#cfd6e6", fontsize=8)
+    axes[2].set_ylabel("Queued Vehicles", color="#cfd6e6", fontsize=8)
     if qlog:
-        sample_rate = max(1, len(qlog) // 350)
-        sampled = qlog[::sample_rate]
-
+        sr      = max(1, len(qlog)//350)
+        sampled = qlog[::sr]
         xs = [q[0] for q in sampled]
         ys = [q[1] for q in sampled]
-
         axes[2].plot(xs, ys, linewidth=2)
-
-        axes[2].fill_between(
-            xs,
-            ys,
-            alpha=0.15
-        )
-
+        axes[2].fill_between(xs, ys, alpha=0.15)
         peak = max(ys) if ys else 1
-
-        axes[2].text(
-        xs[-1] * 0.65,
-        peak * 0.88,
-        f"PEAK QUEUE: {peak}",
-        fontsize=11,
-        fontweight="bold",
-        color="white",
-        bbox=dict(
-            facecolor="black",
-            alpha=0.85,
-            edgecolor="white",
-            boxstyle="round,pad=0.45"
-        )
-    )
-    
+        axes[2].text(xs[-1]*0.65, peak*0.88,
+                     f"PEAK QUEUE: {peak}", fontsize=11, fontweight="bold",
+                     color="white",
+                     bbox=dict(facecolor="black",alpha=0.85,edgecolor="white",boxstyle="round,pad=0.45"))
         axes[2].set_xlim(left=0)
         axes[2].set_ylim(bottom=0)
 
-    fig.subplots_adjust(
-    left=0.11,
-    right=0.97,
-    top=0.955,
-    bottom=0.06,
-    hspace=0.72
-    )
-
+    fig.subplots_adjust(left=0.11,right=0.97,top=0.955,bottom=0.06,hspace=0.72)
     canvas = agg.FigureCanvasAgg(fig)
     canvas.draw()
-
-    renderer = canvas.get_renderer()
-    raw_data = renderer.buffer_rgba()
-
-    canvas_w, canvas_h = canvas.get_width_height()
-
-    surf = pygame.image.frombuffer(
-        raw_data,
-        (canvas_w, canvas_h),
-        "RGBA"
-    ).convert_alpha()
-
-    if canvas_w != int(w) or canvas_h != int(h):
-        surf = pygame.transform.smoothscale(
-            surf,
-            (int(w), int(h))
-        )
-
+    renderer  = canvas.get_renderer()
+    raw_data  = renderer.buffer_rgba()
+    cw2, ch2  = canvas.get_width_height()
+    surf = pygame.image.frombuffer(raw_data,(cw2,ch2),"RGBA").convert_alpha()
+    if cw2 != int(w) or ch2 != int(h):
+        surf = pygame.transform.smoothscale(surf,(int(w),int(h)))
     plt.close(fig)
-
     _chart_cache = surf.copy()
     del surf
-
     return _chart_cache
 
 # ═══════════════════════════════════════════════════════
@@ -1087,6 +1011,8 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
         move=sum(1 for v in sd.vehicles if v["state"]=="moving")
         appr=sum(1 for v in sd.vehicles if v["state"]=="approach")
         done=len(sd.completed); waits=list(sd.wait_times)
+        n_peds=len(sd.pedestrians)
+        ped_phase=sd.ped_phase_active
 
     dirs_label=["N","E","S","W"]
     bw,bh=48,38
@@ -1109,12 +1035,18 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
     y=row("Approaching",appr,y,(180,180,255))
     y=row("Waiting",wait,y,C["red_light"]); y=row("Moving",move,y,C["yellow_light"])
     y=div(y)
+
+    # ── Pedestrian row ──
+    ped_col = (80, 220, 120) if ped_phase else C["text_dim"]
+    ped_lbl = "WALK" if ped_phase else "---"
+    y=row("Pedestrians",f"{n_peds} ({ped_lbl})",y, ped_col)
+    y=div(y)
+
     avg=sum(waits)/len(waits) if waits else 0; mx=max(waits) if waits else 0
     y=row("Avg Wait",f"{avg:.1f}s",y); y=row("Max Wait",f"{mx:.1f}s",y); y=div(y)
     sp=fxs.render(f"Speed x{sd.speed_factor:.1f}",True,C["accent"])
     surf.blit(sp,(px+pw//2-sp.get_width()//2,y)); y+=16; y=div(y)
 
-    # ── Lane toggle ──
     ln=fxs.render(f"Lanes/dir: {N_LANES}",True,C["accent2"])
     surf.blit(ln,(px+pw//2-ln.get_width()//2,y)); y+=14
     hint=fxs.render("[L] cycle lanes (2/3/4/6)",True,C["text_dim"])
@@ -1122,7 +1054,8 @@ def draw_panel(surf, sd, fonts, px, py, pw, ph, road_dirty_flag):
 
     for h in ["[1]Normal [2]Rush [3]Low",
                "[UP]Faster  [DOWN]Slower",
-               "[C]Charts  [R]Reset  [Q]Quit"]:
+               "[C]Charts  [R]Reset  [Q]Quit",
+               "[T]Theme"]:
         hs=fxs.render(h,True,C["text_dim"])
         surf.blit(hs,(px+pw//2-hs.get_width()//2,y)); y+=14
 
@@ -1142,8 +1075,8 @@ def main():
     fsm =pygame.font.SysFont("monospace",12,bold=True)
     fxs =pygame.font.SysFont("monospace",10)
 
-    road_surf   = build_road_surface()
-    road_dirty  = [False]
+    road_surf  = build_road_surface()
+    road_dirty = [False]
 
     threading.Thread(target=run_simulation,args=(SD,),daemon=True).start()
 
@@ -1169,51 +1102,38 @@ def main():
                     SD.reset_flag=True
                     _chart_cache=None; _chart_last_n=-1
                 elif event.key==pygame.K_l:
-                    # Cycle lane count, rebuild geometry and road
                     idx=(LANE_OPTIONS.index(N_LANES)+1)%len(LANE_OPTIONS)
                     N_LANES=LANE_OPTIONS[idx]
                     LANE_W,LANE_OFFS,HR=compute_geometry(N_LANES)
                     SD.reset_flag=True
                     _chart_cache=None; _chart_last_n=-1
                     road_dirty[0]=True
-                elif event.key == pygame.K_t:
-                    names = list(THEMES.keys())
+                elif event.key==pygame.K_t:
+                    names=list(THEMES.keys())
+                    idx=names.index(CURRENT_THEME)
+                    CURRENT_THEME=names[(idx+1)%len(names)]
+                    C=THEMES[CURRENT_THEME]
+                    road_surf=build_road_surface()
 
-                    idx = names.index(CURRENT_THEME)
-                    CURRENT_THEME = names[(idx + 1) % len(names)]
-
-                    C = THEMES[CURRENT_THEME]
-
-                    road_surf = build_road_surface()
-
-        # Rebuild road surface if lane count changed
         if road_dirty[0]:
             road_surf=build_road_surface()
             road_dirty[0]=False
 
         screen.fill(C["bg"])
         if show_charts:
-            chart_top = 34
-
-            screen.blit(
-                build_chart(SD, VIEW_W, HEIGHT - chart_top),
-                (0, chart_top)
-            )
-            header = pygame.Surface((VIEW_W, 34), pygame.SRCALPHA)
-            pygame.draw.rect(header, (0, 0, 0, 120), (0, 0, VIEW_W, 34))
-            screen.blit(header, (0, 0))
-
-            lb = font.render(
-                "TRAFFIC ANALYTICS DASHBOARD  •  Press [C] to return",
-                True,
-                (230, 235, 245)
-            )
-
-            screen.blit(lb, (18, 8))
+            chart_top=34
+            screen.blit(build_chart(SD,VIEW_W,HEIGHT-chart_top),(0,chart_top))
+            header=pygame.Surface((VIEW_W,34),pygame.SRCALPHA)
+            pygame.draw.rect(header,(0,0,0,120),(0,0,VIEW_W,34))
+            screen.blit(header,(0,0))
+            lb=font.render("TRAFFIC ANALYTICS DASHBOARD  •  Press [C] to return",True,(230,235,245))
+            screen.blit(lb,(18,8))
         else:
             screen.blit(road_surf,(0,0))
             draw_lights(screen,SD,fxs)
+            draw_pedestrians(screen,SD)      # ← draw peds BEFORE vehicles (under cars)
             draw_vehicles(screen,SD,fxs)
+
         draw_panel(screen,SD,(font,fsm,fxs),px,py,pw,ph,road_dirty)
         fps=fxs.render(f"FPS {int(clock.get_fps())}",True,C["text_dim"])
         screen.blit(fps,(6,6))
