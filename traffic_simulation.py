@@ -809,149 +809,33 @@ def _draw_arrows(surf, cx, cy):
 
 def _draw_crosswalks(surf, cx, cy):
 
-    zebra  = (240, 240, 240)
-    border = (90, 255, 140)
+    zebra = (235, 235, 235)
 
-    # ====================================================
-    # DYNAMIC VALUES
-    # ====================================================
+    stripe_w   = 10
+    stripe_gap = 8
 
-    crosswalk_w = N_LANES * LANE_W
-    stripe_w    = 10
-    stripe_gap  = 8
+    crosswalk_width = N_LANES * LANE_W
 
-    lane_pad = 10
-
-    total = crosswalk_w
+    stripes = max(
+        4,
+        crosswalk_width // (stripe_w + stripe_gap)
+    )
 
     offset = HR + 6
 
-    lane_thickness = 42
+    lane_thickness = crosswalk_width
 
     # ====================================================
-    # GREEN WALKING LANE
-    # ====================================================
-
-    glow = pygame.Surface((VIEW_W, HEIGHT), pygame.SRCALPHA)
-
-    lane_col = (80, 255, 120, 40)
-
-    # TOP
-    pygame.draw.rect(
-        glow,
-        lane_col,
-        (
-            cx - total//2 - lane_pad,
-            cy - offset - lane_thickness,
-            total + lane_pad*2,
-            lane_thickness
-        )
-    )
-
-    # BOTTOM
-    pygame.draw.rect(
-        glow,
-        lane_col,
-        (
-            cx - total//2 - lane_pad,
-            cy + offset,
-            total + lane_pad*2,
-            lane_thickness
-        )
-    )
-
-    # LEFT
-    pygame.draw.rect(
-        glow,
-        lane_col,
-        (
-            cx - offset - lane_thickness,
-            cy - total//2 - lane_pad,
-            lane_thickness,
-            total + lane_pad*2
-        )
-    )
-
-    # RIGHT
-    pygame.draw.rect(
-        glow,
-        lane_col,
-        (
-            cx + offset,
-            cy - total//2 - lane_pad,
-            lane_thickness,
-            total + lane_pad*2
-        )
-    )
-
-    surf.blit(glow, (0, 0))
-
-    # ====================================================
-    # OUTLINE
-    # ====================================================
-
-    pygame.draw.rect(
-        surf,
-        border,
-        (
-            cx - total//2 - lane_pad,
-            cy - offset - lane_thickness,
-            total + lane_pad*2,
-            lane_thickness
-        ),
-        2
-    )
-
-    pygame.draw.rect(
-        surf,
-        border,
-        (
-            cx - total//2 - lane_pad,
-            cy + offset,
-            total + lane_pad*2,
-            lane_thickness
-        ),
-        2
-    )
-
-    pygame.draw.rect(
-        surf,
-        border,
-        (
-            cx - offset - lane_thickness,
-            cy - total//2 - lane_pad,
-            lane_thickness,
-            total + lane_pad*2
-        ),
-        2
-    )
-
-    pygame.draw.rect(
-        surf,
-        border,
-        (
-            cx + offset,
-            cy - total//2 - lane_pad,
-            lane_thickness,
-            total + lane_pad*2
-        ),
-        2
-    )
-
-    # ====================================================
-    # ZEBRA STRIPES
-    # ====================================================
-
-    stripes = max(4, total // (stripe_w + stripe_gap))
-
-    start_x = cx - total//2
-    start_y = cy - total//2
-
     # TOP + BOTTOM
+    # ====================================================
+
+    start_x = cx - crosswalk_width // 2
+
     for i in range(stripes):
 
         x = start_x + i * (stripe_w + stripe_gap)
 
+        # TOP
         pygame.draw.rect(
             surf,
             zebra,
@@ -963,6 +847,7 @@ def _draw_crosswalks(surf, cx, cy):
             )
         )
 
+        # BOTTOM
         pygame.draw.rect(
             surf,
             zebra,
@@ -974,11 +859,17 @@ def _draw_crosswalks(surf, cx, cy):
             )
         )
 
+    # ====================================================
     # LEFT + RIGHT
+    # ====================================================
+
+    start_y = cy - crosswalk_width // 2
+
     for i in range(stripes):
 
         y = start_y + i * (stripe_w + stripe_gap)
 
+        # LEFT
         pygame.draw.rect(
             surf,
             zebra,
@@ -990,6 +881,7 @@ def _draw_crosswalks(surf, cx, cy):
             )
         )
 
+        # RIGHT
         pygame.draw.rect(
             surf,
             zebra,
