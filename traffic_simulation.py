@@ -85,7 +85,7 @@ TURN_PROBS = [0.25,   0.50,     0.25]
 #  PEDESTRIAN CONFIGURATION
 # ═══════════════════════════════════════════════════════
 PED_SPEED        = 0.6          # pixels per frame
-PED_RADIUS       = 5            # drawn circle radius
+PED_RADIUS = 7                  # drawn circle radius
 PED_SPAWN_CHANCE = 0.55         # probability a pedestrian spawns each clear phase per crosswalk
 PED_COLORS = [
     (255, 200, 120),  # warm skin
@@ -295,56 +295,73 @@ def queue_pixel(v):
 # ═══════════════════════════════════════════════════════
 def _crosswalk_endpoints(axis, side):
     """
-    Returns (start_x, start_y, end_x, end_y) for a pedestrian crossing.
+    Smaller realistic pedestrian crossing paths.
 
-    axis: "NS" = pedestrian crosses the vertical road (moves horizontally)
-          "EW" = pedestrian crosses the horizontal road (moves vertically)
-    side: "north" / "south" for EW crosswalk
-          "west"  / "east"  for NS crosswalk
+    axis:
+        "NS" → crosses vertical road (walks LEFT/RIGHT)
+        "EW" → crosses horizontal road (walks UP/DOWN)
     """
-    offset = HR + 10   # a few pixels outside the stop line
+
+    # Smaller crossing size
+    cross_half = HR + 8
+
+    # Keep pedestrians close to traffic lights
+    signal_offset = HR + 28
 
     if axis == "NS":
-        # Crosses the vertical road band — walks left↔right
-        road_left  = CX - HR
-        road_right = CX + HR
-        if side == "west":
-            y = CY - offset
-        else:
-            y = CY + offset
-        # randomly pick which side they start from
+        # Horizontal walking
+        left_x  = CX - cross_half
+        right_x = CX + cross_half
+
+        y = CY - signal_offset if side == "west" else CY + signal_offset
+
+        # Random walk direction
         if random.random() < 0.5:
-            return road_left - 5, y, road_right + 5, y
+            return left_x, y, right_x, y
         else:
-            return road_right + 5, y, road_left - 5, y
+            return right_x, y, left_x, y
 
     else:  # "EW"
-        # Crosses the horizontal road band — walks up↓
-        road_top    = CY - HR
-        road_bottom = CY + HR
-        if side == "west":
-            x = CX - offset
-        else:
-            x = CX + offset
+        # Vertical walking
+        top_y    = CY - cross_half
+        bottom_y = CY + cross_half
+
+        x = CX - signal_offset if side == "west" else CX + signal_offset
+
         if random.random() < 0.5:
-            return x, road_top - 5, x, road_bottom + 5
+            return x, top_y, x, bottom_y
         else:
-            return x, road_bottom + 5, x, road_top - 5
+            return x, bottom_y, x, top_y
 
 
 def make_pedestrian(pid, axis, side):
+
     sx, sy, ex, ey = _crosswalk_endpoints(axis, side)
-    dist   = math.hypot(ex - sx, ey - sy)
+
+    dist = math.hypot(ex - sx, ey - sy)
+
     return {
-        "id":       pid,
-        "sx": sx, "sy": sy,
-        "ex": ex, "ey": ey,
-        "total":    dist,
-        "walked":   0.0,
-        "done":     False,
-        "skin":     random.choice(PED_COLORS),
-        "shirt":    random.choice(SHIRT_COLORS),
-        "bob":      random.uniform(0, math.pi * 2),   # walking bob phase
+        "id": pid,
+
+        "sx": sx,
+        "sy": sy,
+
+        "ex": ex,
+        "ey": ey,
+
+        "total": dist,
+        "walked": 0.0,
+
+        # NEW
+        "state": "waiting",
+        "wait_timer": random.uniform(0.5, 2.0),
+
+        "done": False,
+
+        "skin": random.choice(PED_COLORS),
+        "shirt": random.choice(SHIRT_COLORS),
+
+        "bob": random.uniform(0, math.pi * 2),
     }
 
 
@@ -375,6 +392,9 @@ class SimData:
         self.reset_flag      = False
 
 SD = SimData()
+
+def pedestrian_crossing_active(sd):
+    return any(not p["done"] for p in sd.pedestrians)
 
 # ═══════════════════════════════════════════════════════
 #  SIMPY ENGINE
@@ -512,18 +532,42 @@ def run_simulation(sd: SimData):
 
                 lights = list(sd.lights)
                 now    = env.now
-
-                # ── Move pedestrians ──
+                # ─────────────────────────────
+                # Move pedestrians
+                # ─────────────────────────────
                 still_walking = []
+
                 for p in sd.pedestrians:
+
                     if p["done"]:
                         continue
-                    p["walked"] = min(p["total"], p["walked"] + PED_SPEED)
-                    p["bob"]   += 0.25
-                    if p["walked"] >= p["total"] - 0.5:
-                        p["done"] = True
-                    else:
+
+                    # WAITING STATE
+                    if p["state"] == "waiting":
+
+                        p["wait_timer"] -= FRAME_T
+
+                        if p["wait_timer"] <= 0:
+                            p["state"] = "crossing"
+
                         still_walking.append(p)
+                        continue
+
+                    # CROSSING STATE
+                    if p["state"] == "crossing":
+
+                        p["walked"] = min(
+                            p["total"],
+                            p["walked"] + PED_SPEED
+                        )
+
+                        p["bob"] += 0.25
+
+                        if p["walked"] >= p["total"] - 0.5:
+                            p["done"] = True
+                        else:
+                            still_walking.append(p)
+
                 sd.pedestrians = still_walking
 
                 # ── Vehicle logic (unchanged) ──
@@ -593,7 +637,7 @@ def run_simulation(sd: SimData):
                         slot = v.get("queue_slot", 0)
                         q    = ql.get(key, [])
 
-                        if grn and slot == 0:
+                        if grn and slot == 0 and not pedestrian_crossing_active(sd):
                             lane_clear = True
                             for ov in sd.vehicles:
                                 if (ov is not v
@@ -611,7 +655,7 @@ def run_simulation(sd: SimData):
                                 q.remove(v)
                                 for i, rv in enumerate(q): rv["queue_slot"] = i
 
-                        elif grn and slot > 0:
+                        elif grn and slot > 0 and not pedestrian_crossing_active(sd):
                             leader = q[slot-1]
                             if (leader["state"] == "moving"
                                     and leader["dist"] >= v["stop_d"] + SLOT):
@@ -633,7 +677,27 @@ def run_simulation(sd: SimData):
                             spd = CAR_SPEED
 
                         old_d     = v["dist"]
-                        v["dist"] = min(v["plen"], old_d + spd)
+                        # ─────────────────────────
+                        # PEDESTRIAN CROSSING YIELD
+                        # ─────────────────────────
+                        if pedestrian_crossing_active(sd):
+
+                            cross_limit = v["stop_d"] - 8
+
+                            # approaching the crosswalk
+                            if old_d < cross_limit:
+                                next_d = min(v["plen"], old_d + spd)
+
+                                if next_d >= cross_limit:
+                                    next_d = cross_limit
+                                    spd = 0
+
+                                v["dist"] = next_d
+                            else:
+                                v["dist"] = old_d
+
+                        else:
+                            v["dist"] = min(v["plen"], old_d + spd)
                         lane_list = mov_lane.get((d, lane), [])
                         if old_d in lane_list:
                             lane_list.remove(old_d)
@@ -744,18 +808,198 @@ def _draw_arrows(surf, cx, cy):
         arrow(cx-HR-dist,  cy-off,     0)
 
 def _draw_crosswalks(surf, cx, cy):
-    n, sh, sg = 5, 5, 4
-    total, ofs = n*(sh+sg), 5
-    for i in range(n):
-        s = pygame.Surface((HR*2, sh), pygame.SRCALPHA)
-        pygame.draw.rect(s,(218,220,228,75),(0,0,HR*2,sh))
-        surf.blit(s,(cx-HR, cy-HR-ofs-total+i*(sh+sg)))
-        surf.blit(s,(cx-HR, cy+HR+ofs+i*(sh+sg)))
-        s2 = pygame.Surface((sh, HR*2), pygame.SRCALPHA)
-        pygame.draw.rect(s2,(218,220,228,75),(0,0,sh,HR*2))
-        surf.blit(s2,(cx+HR+ofs+i*(sh+sg),         cy-HR))
-        surf.blit(s2,(cx-HR-ofs-total+i*(sh+sg),   cy-HR))
 
+    zebra  = (240, 240, 240)
+    border = (90, 255, 140)
+
+    # ====================================================
+    # DYNAMIC VALUES
+    # ====================================================
+
+    crosswalk_w = N_LANES * LANE_W
+    stripe_w    = 10
+    stripe_gap  = 8
+
+    lane_pad = 10
+
+    total = crosswalk_w
+
+    offset = HR + 6
+
+    lane_thickness = 42
+
+    # ====================================================
+    # GREEN WALKING LANE
+    # ====================================================
+
+    glow = pygame.Surface((VIEW_W, HEIGHT), pygame.SRCALPHA)
+
+    lane_col = (80, 255, 120, 40)
+
+    # TOP
+    pygame.draw.rect(
+        glow,
+        lane_col,
+        (
+            cx - total//2 - lane_pad,
+            cy - offset - lane_thickness,
+            total + lane_pad*2,
+            lane_thickness
+        )
+    )
+
+    # BOTTOM
+    pygame.draw.rect(
+        glow,
+        lane_col,
+        (
+            cx - total//2 - lane_pad,
+            cy + offset,
+            total + lane_pad*2,
+            lane_thickness
+        )
+    )
+
+    # LEFT
+    pygame.draw.rect(
+        glow,
+        lane_col,
+        (
+            cx - offset - lane_thickness,
+            cy - total//2 - lane_pad,
+            lane_thickness,
+            total + lane_pad*2
+        )
+    )
+
+    # RIGHT
+    pygame.draw.rect(
+        glow,
+        lane_col,
+        (
+            cx + offset,
+            cy - total//2 - lane_pad,
+            lane_thickness,
+            total + lane_pad*2
+        )
+    )
+
+    surf.blit(glow, (0, 0))
+
+    # ====================================================
+    # OUTLINE
+    # ====================================================
+
+    pygame.draw.rect(
+        surf,
+        border,
+        (
+            cx - total//2 - lane_pad,
+            cy - offset - lane_thickness,
+            total + lane_pad*2,
+            lane_thickness
+        ),
+        2
+    )
+
+    pygame.draw.rect(
+        surf,
+        border,
+        (
+            cx - total//2 - lane_pad,
+            cy + offset,
+            total + lane_pad*2,
+            lane_thickness
+        ),
+        2
+    )
+
+    pygame.draw.rect(
+        surf,
+        border,
+        (
+            cx - offset - lane_thickness,
+            cy - total//2 - lane_pad,
+            lane_thickness,
+            total + lane_pad*2
+        ),
+        2
+    )
+
+    pygame.draw.rect(
+        surf,
+        border,
+        (
+            cx + offset,
+            cy - total//2 - lane_pad,
+            lane_thickness,
+            total + lane_pad*2
+        ),
+        2
+    )
+
+    # ====================================================
+    # ZEBRA STRIPES
+    # ====================================================
+
+    stripes = max(4, total // (stripe_w + stripe_gap))
+
+    start_x = cx - total//2
+    start_y = cy - total//2
+
+    # TOP + BOTTOM
+    for i in range(stripes):
+
+        x = start_x + i * (stripe_w + stripe_gap)
+
+        pygame.draw.rect(
+            surf,
+            zebra,
+            (
+                x,
+                cy - offset - lane_thickness,
+                stripe_w,
+                lane_thickness
+            )
+        )
+
+        pygame.draw.rect(
+            surf,
+            zebra,
+            (
+                x,
+                cy + offset,
+                stripe_w,
+                lane_thickness
+            )
+        )
+
+    # LEFT + RIGHT
+    for i in range(stripes):
+
+        y = start_y + i * (stripe_w + stripe_gap)
+
+        pygame.draw.rect(
+            surf,
+            zebra,
+            (
+                cx - offset - lane_thickness,
+                y,
+                lane_thickness,
+                stripe_w
+            )
+        )
+
+        pygame.draw.rect(
+            surf,
+            zebra,
+            (
+                cx + offset,
+                y,
+                lane_thickness,
+                stripe_w
+            )
+        )
 # ═══════════════════════════════════════════════════════
 #  TRAFFIC LIGHTS
 # ═══════════════════════════════════════════════════════
@@ -799,6 +1043,21 @@ def draw_lights(surf, sd, fxs):
     pole(cx+HR+8,  cy+HR+4,  lights[2], show_walk=ped_phase)
     pole(cx-HR-22, cy+HR+4,  lights[3], show_walk=ped_phase)
 
+    if ped_phase:
+        pygame.draw.rect(
+            surf,
+            (40, 180, 80),
+            (cx-18, cy-18, 36, 36),
+            border_radius=6
+        )
+
+        walk = fxs.render("WALK", True, (255,255,255))
+        surf.blit(
+            walk,
+            (cx - walk.get_width()//2,
+                cy - walk.get_height()//2)
+        )
+
     tb=pygame.Surface((52,18),pygame.SRCALPHA)
     pygame.draw.rect(tb,(0,0,0,165),(0,0,52,18),border_radius=4)
     surf.blit(tb,(cx-26,cy-9))
@@ -810,40 +1069,100 @@ def draw_lights(surf, sd, fxs):
 #  PEDESTRIAN RENDERER
 # ═══════════════════════════════════════════════════════
 def draw_pedestrians(surf, sd):
+
     with sd.lock:
         peds = list(sd.pedestrians)
 
     for p in peds:
-        if p["done"] or p["total"] < 1:
+
+        if p["done"]:
             continue
 
-        t  = p["walked"] / p["total"]
-        px = int(p["sx"] + t * (p["ex"] - p["sx"]))
-        py = int(p["sy"] + t * (p["ey"] - p["sy"]))
+        # WAITING POSITION
+        if p["state"] == "waiting":
 
-        # Walking bob: slight vertical oscillation
+            px = int(p["sx"])
+            py = int(p["sy"])
+
+        else:
+
+            t = p["walked"] / max(1, p["total"])
+
+            px = int(
+                p["sx"] + t * (p["ex"] - p["sx"])
+            )
+
+            py = int(
+                p["sy"] + t * (p["ey"] - p["sy"])
+            )
+
         bob = int(math.sin(p["bob"]) * 2)
 
         skin  = p["skin"]
         shirt = p["shirt"]
-        r     = PED_RADIUS
 
-        # Shadow
-        sh = pygame.Surface((r*4, r*2), pygame.SRCALPHA)
-        pygame.draw.ellipse(sh, (0,0,0,60), (0,0,r*4,r*2))
-        surf.blit(sh, (px - r*2, py + r*2 + 2))
+        r = PED_RADIUS
 
-        # Body (shirt colour)
-        pygame.draw.circle(surf, shirt, (px, py + bob + r), r)
+        # shadow
+        shadow = pygame.Surface((r*5, r*3), pygame.SRCALPHA)
 
-        # Head
-        pygame.draw.circle(surf, skin,  (px, py + bob - r + 1), r - 1)
+        pygame.draw.ellipse(
+            shadow,
+            (0,0,0,80),
+            (0,0,r*5,r*3)
+        )
 
-        # Legs — simple two-dot animation
+        surf.blit(
+            shadow,
+            (px-r*2, py+r*2)
+        )
+
+        # waiting glow
+        if p["state"] == "waiting":
+
+            glow = pygame.Surface((28,28), pygame.SRCALPHA)
+
+            pygame.draw.circle(
+                glow,
+                (80,255,120,80),
+                (14,14),
+                12
+            )
+
+            surf.blit(glow, (px-14, py-14))
+
+        # body
+        pygame.draw.circle(
+            surf,
+            shirt,
+            (px, py + bob + r),
+            r
+        )
+
+        # head
+        pygame.draw.circle(
+            surf,
+            skin,
+            (px, py + bob - r + 1),
+            r - 1
+        )
+
+        # legs
         leg_off = int(math.sin(p["bob"] * 2) * 3)
-        pygame.draw.circle(surf, skin, (px - 2, py + bob + r*2 + leg_off),     2)
-        pygame.draw.circle(surf, skin, (px + 2, py + bob + r*2 - leg_off + 1), 2)
 
+        pygame.draw.circle(
+            surf,
+            skin,
+            (px - 2, py + bob + r*2 + leg_off),
+            2
+        )
+
+        pygame.draw.circle(
+            surf,
+            skin,
+            (px + 2, py + bob + r*2 - leg_off),
+            2
+        )
 # ═══════════════════════════════════════════════════════
 #  VEHICLE RENDERER
 # ═══════════════════════════════════════════════════════
